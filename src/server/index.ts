@@ -29,11 +29,14 @@ app.use("/api/*", async (context, next) => {
   const requestHost = context.req.header("host")?.toLowerCase();
   const origin = context.req.header("origin");
   const fetchSite = context.req.header("sec-fetch-site");
+  // OAuth returns through a cross-site top-level navigation; its handler verifies one-time state and PKCE.
+  const isChatGPTOAuthCallback =
+    context.req.method === "GET" && context.req.path === "/api/providers/chatgpt/callback";
   if (
     !requestHost ||
     !allowedHosts.has(requestHost) ||
-    (origin && !allowedOrigins.has(origin)) ||
-    fetchSite === "cross-site"
+    (!isChatGPTOAuthCallback && origin && !allowedOrigins.has(origin)) ||
+    (!isChatGPTOAuthCallback && fetchSite === "cross-site")
   ) {
     return context.json({ error: "Local API request rejected." }, 403);
   }

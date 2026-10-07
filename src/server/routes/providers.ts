@@ -306,6 +306,8 @@ providerRoutes.post("/profiles/:id/chatgpt/disconnect", (context) => {
 });
 
 providerRoutes.get("/chatgpt/callback", async (context) => {
+  context.header("Cache-Control", "no-store");
+  context.header("Referrer-Policy", "no-referrer");
   const result = await completeChatGPTAuthorization(new URL(context.req.url));
   const redirect = chatGPTCallbackRedirect(result);
   if (redirect) return context.redirect(redirect, 302);
