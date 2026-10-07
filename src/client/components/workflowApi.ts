@@ -50,15 +50,17 @@ export class WorkflowController<TBlueprint, TVersion> {
   private initialized = false;
   private loading: Promise<void> | null = null;
   private journalRevision: number | null = null;
+  private journalConflict = false;
 
   constructor() {
     try {
-      const journal = JSON.parse(localStorage.getItem(JOURNAL_KEY) ?? "null") as { revision?: number; pending?: PendingCommand[] } | null;
+      const journal = JSON.parse(localStorage.getItem(JOURNAL_KEY) ?? "null") as { revision?: number; pending?: PendingCommand[]; conflict?: boolean } | null;
       if (journal && Number.isInteger(journal.revision) && Array.isArray(journal.pending)) {
         const pending = journal.pending.filter((entry) => typeof entry.key === "string" && entry.command && typeof entry.command === "object" && Number.isInteger(entry.sequence));
         this.state = { ...this.state, pending };
         this.sequence = pending.reduce((max, entry) => Math.max(max, entry.sequence), 0);
         this.journalRevision = journal.revision ?? null;
+        this.journalConflict = journal.conflict === true;
       }
     } catch { /* A malformed local recovery journal must never replace the server document. */ }
   }
@@ -77,7 +79,7 @@ export class WorkflowController<TBlueprint, TVersion> {
   private journal() {
     try {
       if (!this.state.pending.length) localStorage.removeItem(JOURNAL_KEY);
-      else localStorage.setItem(JOURNAL_KEY, JSON.stringify({ revision: this.state.response?.revision ?? this.journalRevision, pending: this.state.pending }));
+      else localStorage.setItem(JOURNAL_KEY, JSON.stringify({ revision: this.state.response?.revision ?? this.journalRevision, pending: this.state.pending, conflict: this.state.saveState === "conflict" }));
     } catch {
       this.publish({ error: "浏览器无法保存未提交草稿备份；请先手动保存，再关闭页面。" });
     }
@@ -89,7 +91,7 @@ export class WorkflowController<TBlueprint, TVersion> {
     this.loading = (async () => {
       try {
         const response = await workflowRequest<WorkflowResponse<TBlueprint, TVersion>>();
-        const conflict = this.state.pending.length > 0 && this.journalRevision !== response.revision;
+        const conflict = this.state.pending.length > 0 && (this.journalConflict || this.journalRevision !== response.revision);
         this.publish({ response, saveState: conflict ? "conflict" : this.state.pending.length ? "dirty" : "saved", error: conflict ? "恢复的本地草稿与服务器版本不同。草稿已保留，请先检查差异并决定如何应用。" : null });
         this.initialized = true;
         if (this.state.pending.length && !conflict) this.scheduleSave();

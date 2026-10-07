@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { allEntities, blueprintSchema, emptyContent, entityFields, previewImport, storyInputSchema } from "../src/shared/workflow.js";
+import { activeApprovedCharacters, allEntities, blueprintSchema, emptyContent, entityApprovalErrors, entityFields, previewImport, storyInputSchema } from "../src/shared/workflow.js";
 import type { Blueprint, Content, OutlineItem, StageId, WorkflowEntity } from "../src/shared/workflow.js";
 import {
   applyWorkflowCommand, assertCanGenerate, beginGeneration, canFinalize, completeGeneration,
@@ -16,19 +16,20 @@ function contentFor(bp: Blueprint, row: WorkflowEntity): Content {
   for (const field of entityFields[row.kind]) {
     if (field.type === "text") content[field.key] = `已明确${field.label}`;
     if (field.type === "textList") content[field.key] = field.required ? ["主线"] : [];
-    if (field.type === "referenceList") content[field.key] = allEntities(bp).filter((item) => item.kind === field.referenceKind).map((item) => item.id);
+    if (field.type === "referenceList") content[field.key] = allEntities(bp).filter((item) => item.kind === field.referenceKind && item.status === "APPROVED").map((item) => item.id);
     if (field.type === "number") content[field.key] = row.content[field.key];
   }
   if (row.kind === "storyBible") content.locations = ["学院"];
   if (row.kind === "character") content.dynamicAttributes = [{ key: "trust", label: "信任", min: 0, max: 100, initial: 10 }];
   if (row.kind === "ending") content.endingType = "NORMAL";
-  if (row.kind === "relationships") content.relationships = bp.characters.length > 1 ? [{ fromCharacterId: bp.characters[0].id, toCharacterId: bp.characters[1].id, relationship: "尚待建立信任" }] : [];
-  if (row.kind === "chapterCharacterPlan") content.characters = bp.characters.map((character) => ({ characterId: character.id, startState: "谨慎", goal: "寻找线索", mentalChange: "开始信任", relationshipChange: "建立合作", knownInformation: ["照片"], forbiddenInformation: ["核心秘密"], attributeChanges: [{ key: "trust", delta: 5 }], endState: "愿意合作" }));
+  const characters = activeApprovedCharacters(bp);
+  if (row.kind === "relationships") content.relationships = characters.length > 1 ? [{ fromCharacterId: characters[0].id, toCharacterId: characters[1].id, relationship: "尚待建立信任" }] : [];
+  if (row.kind === "chapterCharacterPlan") content.characters = characters.map((character) => ({ characterId: character.id, startState: "谨慎", goal: "寻找线索", mentalChange: "开始信任", relationshipChange: "建立合作", knownInformation: ["照片"], forbiddenInformation: ["核心秘密"], attributeChanges: [{ key: "trust", delta: 5 }], endState: "愿意合作" }));
   if (row.kind === "criticalBranch") content.choices = ["公开", "保留"].map((label, index) => ({ id: `choice-${index}`, label, hidden: false, unlockConditions: [], effects: [`${label}情报`], relationshipEffects: ["改变信任"], futureChapterEffects: ["改变后续调查"], opensRoutes: ["主线"], closesRoutes: [], endingIds: bp.endings.map((ending) => ending.id) }));
   if (row.kind === "initialWorldState") {
     content.initialTime = "第一日早晨"; content.initialLocation = "学院"; content.accessibleLocations = ["学院"];
-    content.characterLocations = Object.fromEntries(bp.characters.map((character) => [character.id, "学院"]));
-    content.characterAttributes = Object.fromEntries(bp.characters.map((character) => [character.id, { trust: 10 }]));
+    content.characterLocations = Object.fromEntries(characters.map((character) => [character.id, "学院"]));
+    content.characterAttributes = Object.fromEntries(characters.map((character) => [character.id, { trust: 10 }]));
   }
   return content;
 }
@@ -181,6 +182,18 @@ test("生成取消保留之前数据与状态，陈旧 token 不可回写", () =
   assert.throws(() => completeGeneration(recovered, target.id, { content: target.content }, "current-token"), /过期/);
 });
 
+test("总体检查生成失败持久化可见原因，重试清除旧错误且保留内容", () => {
+  const blueprint = completedContent();
+  const generating = beginGeneration(blueprint, "blueprint-review", "review-failure");
+  const recovered = failGeneration(generating, "模型服务超时，请重试总体检查");
+  assert.equal(recovered.workflowState.generationError, "模型服务超时，请重试总体检查");
+  assert.equal(recovered.workflowState.review.status, "DRAFT");
+  assert.equal(recovered.workflowState.activeGeneration, null);
+  assert.deepEqual(recovered.storyBible.content, blueprint.storyBible.content);
+  const retry = beginGeneration(recovered, "blueprint-review", "review-retry");
+  assert.equal(retry.workflowState.generationError, null);
+});
+
 test("Finalize 拒绝 ERROR 与陈旧报告，WARNING 不阻塞有效审批", () => {
   let bp = completedContent();
   bp = generated(bp, "blueprint-review", { issues: [{ severity: "ERROR", category: "Story", message: "主线冲突", entityIds: [bp.storyBible.id], suggestion: "完善主线" }] });
@@ -215,4 +228,126 @@ test("JSON 导入拒绝未来版本、未知字段及非法引用", () => {
   assert.equal(previewImport("story", { name: "故事", genre: "悬疑", outline: "调查", runtime: true }).valid, false);
   const invalid = structuredClone(bp); invalid.relationships!.content.relationships = [{ fromCharacterId: "missing", toCharacterId: bp.characters[1].id, relationship: "测试" }];
   assert.equal(previewImport("blueprint", invalid).valid, false);
+});
+
+test("仅创建空白详情后重新规划清单会移除过期草稿并保持有效结构", () => {
+  let bp = confirm(approve(base(), "story-bible"), "story");
+  bp = approvePlan(bp, "outline-characters", planResult("character", ["Alice", "Bob"]));
+  const oldIds = bp.characters.map((row) => row.id);
+  bp = generated(bp, "outline-characters", planResult("character", ["Yuki"]));
+  assert.equal(bp.characters.length, 0);
+  assert.equal(bp.workflowState.outlinePlans.find((row) => row.id === "outline-characters")?.status, "PENDING_REVIEW");
+  bp = applyWorkflowCommand(bp, { type: "approveOutline", outlineId: "outline-characters" });
+  assert.deepEqual(bp.characters.map((row) => row.name), ["Yuki"]);
+  assert.equal(bp.characters.some((row) => oldIds.includes(row.id)), false);
+  assert.equal(previewImport("blueprint", bp).valid, true);
+});
+
+test("旧确认标记不能绕过真实审批状态，卷章扩展使原卷和下游复审", () => {
+  let bp = completedChapters();
+  const malicious = structuredClone(bp); malicious.characters[0].status = "NEEDS_REVIEW";
+  assert.throws(() => assertCanGenerate(malicious, malicious.chapterCharacterPlans[0].id), /前置阶段/);
+  const oldChapterContent = structuredClone(bp.chapters[0].content);
+  bp = applyWorkflowCommand(bp, { type: "configureChapters", counts: [3] });
+  assert.equal(bp.volumes[0].status, "NEEDS_REVIEW");
+  assert.equal(bp.chapters[0].status, "NEEDS_REVIEW");
+  assert.equal(bp.chapters[2].status, "DRAFT");
+  assert.deepEqual(bp.chapters[0].content, oldChapterContent);
+  assert.equal(bp.workflowState.stageConfirmations.chapters, false);
+  assert.equal(bp.workflowState.stageConfirmations.story, true);
+});
+
+test("新增建议等待审批，批准只修改清单，确认清单之后才创建新草稿", () => {
+  let bp = confirm(approve(base(), "story-bible"), "story");
+  bp = approvePlan(bp, "outline-characters", planResult("character", ["Alice"]));
+  const alice = bp.characters[0];
+  const addition = { outlineId: "outline-characters", name: "Teacher", kind: "character", source: "AI", purpose: "连接过去与现在的事件", required: true, enabled: true, relatedIds: [bp.storyBible.id], volumeNumbers: [1] };
+  bp = generated(bp, alice.id, { content: contentFor(bp, alice), additionSuggestions: [addition] });
+  assert.equal(bp.characters.length, 1);
+  assert.equal(bp.workflowState.outlinePlans.find((row) => row.id === "outline-characters")?.items.length, 1);
+  const suggestion = bp.workflowState.additionSuggestions[0];
+  assert.equal(suggestion.status, "PENDING_REVIEW");
+  assert.notEqual(suggestion.item.id, alice.id);
+  assert.equal(previewImport("blueprint", bp).valid, true);
+  bp = applyWorkflowCommand(bp, { type: "approveAddition", suggestionId: suggestion.id });
+  assert.equal(bp.workflowState.additionSuggestions[0].status, "APPROVED");
+  assert.equal(bp.characters.length, 1);
+  assert.equal(bp.characters[0].status, "NEEDS_REVIEW");
+  assert.equal(bp.workflowState.outlinePlans.find((row) => row.id === "outline-characters")?.status, "PENDING_REVIEW");
+  assert.throws(() => assertCanGenerate(bp, alice.id), /之前的必需|清单/);
+  bp = applyWorkflowCommand(bp, { type: "approveOutline", outlineId: "outline-characters" });
+  assert.equal(bp.characters.length, 2);
+  assert.equal(bp.characters.find((row) => row.id === suggestion.item.id)?.status, "DRAFT");
+  assert.equal(bp.characters.find((row) => row.id === suggestion.item.id)?.name, "Teacher");
+  assert.equal(previewImport("blueprint", bp).valid, true);
+});
+
+test("拒绝新增建议不扩张范围，越界、伪造 ID 和未来引用均被拒绝", () => {
+  let bp = confirm(approve(base(), "story-bible"), "story");
+  bp = approvePlan(bp, "outline-characters", planResult("character", ["Alice"]));
+  const alice = bp.characters[0];
+  const addition = { outlineId: "outline-characters", name: "Doctor", kind: "character", source: "AI", purpose: "解释调查证据", required: true, enabled: true, relatedIds: [bp.storyBible.id], volumeNumbers: [] };
+  const result = { content: contentFor(bp, alice), additionSuggestions: [addition] };
+  assert.throws(() => generated(bp, alice.id, { ...result, additionSuggestions: [{ ...addition, outlineId: "missing-outline" }] }), /清单不存在/);
+  assert.throws(() => generated(bp, alice.id, { ...result, additionSuggestions: [{ ...addition, kind: "ending" }] }), /类型/);
+  assert.throws(() => generated(bp, alice.id, { ...result, additionSuggestions: [{ ...addition, id: "forged-id" }] }));
+  assert.throws(() => generated(bp, alice.id, { ...result, additionSuggestions: [{ ...addition, relatedIds: [bp.chapters[0].id] }] }), /已审批/);
+  bp = generated(bp, alice.id, result);
+  bp = applyWorkflowCommand(bp, { type: "rejectAddition", suggestionId: bp.workflowState.additionSuggestions[0].id });
+  assert.equal(bp.workflowState.additionSuggestions[0].status, "REJECTED");
+  assert.equal(bp.workflowState.outlinePlans.find((row) => row.id === "outline-characters")?.items.length, 1);
+  assert.equal(bp.characters.length, 1);
+  assert.throws(() => applyWorkflowCommand(bp, { type: "approveAddition", suggestionId: bp.workflowState.additionSuggestions[0].id }), /已处理/);
+});
+
+test("旧 Schema v1 草稿缺少新增建议字段时默认恢复为空，故事名称长度与标题一致", () => {
+  const original = createBlueprint();
+  const legacy = { ...original, workflowState: { ...original.workflowState } } as Omit<Blueprint, "workflowState"> & { workflowState: Omit<Blueprint["workflowState"], "additionSuggestions"> & { additionSuggestions?: Blueprint["workflowState"]["additionSuggestions"] } };
+  delete legacy.workflowState.additionSuggestions;
+  const preview = previewImport("blueprint", legacy);
+  assert.equal(preview.valid, true);
+  assert.deepEqual((preview.data as Blueprint).workflowState.additionSuggestions, []);
+  assert.equal(storyInputSchema.safeParse({ name: "x".repeat(301), genre: "悬疑", outline: "调查" }).success, false);
+  assert.equal(storyInputSchema.safeParse({ name: "x".repeat(300), genre: "悬疑", outline: "调查" }).success, true);
+});
+
+test("导入不能删除已批准清单的必需实体绕过审批或提前进入下一阶段", () => {
+  const bp = completedCharacters();
+  const removed = bp.characters[1].id;
+  const invalid = structuredClone(bp);
+  invalid.characters = invalid.characters.filter((row) => row.id !== removed);
+  invalid.relationships!.content.relationships = [];
+  for (const entity of allEntities(invalid)) entity.dependencies = entity.dependencies.filter((id) => id !== removed);
+  for (const plan of invalid.workflowState.outlinePlans) plan.dependencies = plan.dependencies.filter((id) => id !== removed);
+  const preview = previewImport("blueprint", invalid);
+  assert.equal(preview.valid, false);
+  assert.equal(preview.errors.some((error) => error.includes("已确认清单缺少对应实体")), true);
+  assert.notEqual(getStageStatus(invalid, "characters"), "CONFIRMED");
+  assert.throws(() => assertCanGenerate(invalid, "outline-endings"), /前置阶段/);
+});
+
+test("未采用的可选人物草稿不阻塞初始世界及 Finalize，禁用人物不强制初始映射", () => {
+  let bp = confirm(approve(base([1]), "story-bible"), "story");
+  bp = approvePlan(bp, "outline-characters", { items: [
+    { name: "Alice", kind: "character", source: "AI", purpose: "主线调查", required: true, enabled: true, relatedIds: [], volumeNumbers: [] },
+    { name: "Observer", kind: "character", source: "AI", purpose: "可选的调查视角", required: false, enabled: true, relatedIds: [], volumeNumbers: [] },
+  ] });
+  bp = approve(bp, bp.characters[0].id);
+  const optionalId = bp.characters[1].id;
+  bp = confirm(approve(bp, "relationships"), "characters");
+  assert.equal(bp.characters[1].status, "DRAFT");
+  bp = approvePlan(bp, "outline-endings", planResult("ending")); bp = approve(bp, bp.endings[0].id); bp = confirm(bp, "endings");
+  bp = approve(bp, bp.volumes[0].id); bp = approve(bp, bp.chapters[0].id); bp = confirm(bp, "chapters");
+  bp = approve(bp, bp.chapterCharacterPlans[0].id); bp = approvePlan(bp, `outline-branches-${bp.chapters[0].id}`, { items: [] }); bp = confirm(bp, "branches");
+  bp = approvePlan(bp, "outline-systems", planResult("gameSystem")); bp = approve(bp, bp.gameSystems[0].id);
+  bp = confirm(approve(bp, "initial-world-state"), "systems");
+  assert.equal(Object.hasOwn(bp.initialWorldState!.content.characterLocations as object, optionalId), false);
+  bp = generated(bp, "blueprint-review", { issues: [] }); bp = applyWorkflowCommand(bp, { type: "approveReview" }); bp = confirm(bp, "review");
+  assert.equal(canFinalize(bp), true);
+  const disabled = structuredClone(bp);
+  disabled.characters[1].content = contentFor(disabled, disabled.characters[1]) as WorkflowEntity["content"];
+  disabled.characters[1].status = "APPROVED";
+  disabled.workflowState.outlinePlans.find((plan) => plan.stageId === "characters")!.items[1].enabled = false;
+  assert.deepEqual(activeApprovedCharacters(disabled).map((character) => character.id), [bp.characters[0].id]);
+  assert.deepEqual(entityApprovalErrors(disabled, disabled.initialWorldState!), []);
 });

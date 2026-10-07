@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Activity,
   ArrowDownRight,
@@ -22,7 +22,7 @@ import {
 import type { DiagnosticGroup, DiagnosticItem, DiagnosticReport } from "../shared/diagnostics";
 import { NarrativePreview } from "./components/NarrativePreview";
 import { ProviderSettings } from "./components/ProviderSettings";
-import { WorkflowWorkbench } from "./components/WorkflowWorkbench";
+const WorkflowWorkbench = lazy(() => import("./components/WorkflowWorkbench").then((module) => ({ default: module.WorkflowWorkbench })));
 
 const frontendItems: DiagnosticItem[] = [
   {
@@ -443,7 +443,7 @@ export function App() {
           </div>
         </header>
 
-        {activeView === "workflow" ? <WorkflowWorkbench onOpenProviders={() => setActiveView("providers")} /> : activeView === "providers" ? <ProviderSettings /> : (
+        {activeView === "workflow" ? <Suspense fallback={<div className="page-content" role="status" aria-live="polite">正在准备前置创作工作台…</div>}><WorkflowWorkbench onOpenProviders={() => setActiveView("providers")} /></Suspense> : activeView === "providers" ? <ProviderSettings /> : (
         <div className="page-content" id="overview">
           <section className="welcome-band">
             <div className="welcome-band__grid" aria-hidden="true" />

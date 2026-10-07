@@ -1,6 +1,6 @@
 # Project Chronicle
 
-本地单人叙事创作工作台的初始脚手架。当前包括 React/Vite 创作首页、React Flow 示例图、Hono 本机 API、SQLite/Drizzle 基础表、USearch HNSW 探测，以及模型服务连接检查弹窗。
+本地单人叙事创作工作台。当前包括七阶段前置创作 Workflow、版本化 Game Blueprint、React/Vite 创作首页、React Flow 示例图、Hono 本机 API、SQLite/Drizzle 本地保存、USearch HNSW 探测，以及模型服务配置和连接检查。
 
 ## 环境要求
 
@@ -30,7 +30,32 @@ SQLite 文件默认创建在 `.data/project-chronicle.sqlite`。向量正文与 
 
 将 `EMBEDDING_LOCAL_ENABLED` 设为 `false` 后，可配置 OpenAI 兼容 Embedding 服务。OpenAI 兼容聊天服务仍使用 `/models` 做连通检查；远程 Embedding 检查会发送固定短文本，可能计入所选服务商的少量请求用量。服务端仅返回状态和维度信息，不会把密钥发送给浏览器。
 
-ChatGPT Plus plan usage 的 SIWC 登录流程暂未实现。当前官方客户端资格、客户端注册和许可适用性仍需产品侧确认；检查面板会将其标为待接入，而非连接失败或登录成功。
+模型与 API 页面支持多个兼容中转预设和独立的 ChatGPT SIWC 授权；保存并激活预设后，Workflow 使用其中的中档模型。兼容中转调用 Chat Completions，ChatGPT 计划授权调用 Responses（`store:false`、流式响应，等待完成事件）。密钥与令牌只在服务端本地加密保存。真实账号资格、额度、令牌刷新和模型创作质量仍需使用所选服务实际验证，模型目录连通不代表生成可用。
+
+## 前置创作 Workflow
+
+点击侧栏“前置创作”，或打开 `http://127.0.0.1:5173/?view=workflow`。按基础设定 → 人物 → 结局 → 卷与章节 → 人物变化 / 分支 → SLG 系统与初始世界 → 最终检查进行创作。
+
+- 基础输入先填写名称、类型和大纲；Story Bible 整体审批。卷章数量由用户指定，固定大纲直接展开。
+- 人物、结局、每章关键分支和系统先生成或编辑 Outline Plan，确认清单后才建立详情草稿；每次只生成一个审批对象，审批通过再继续。
+- 已审批内容可修改。下游内容保留，并显示 NEEDS_REVIEW；可保持内容重新审批、手动编辑、按意见修订或重新生成。AI 新增项目必须先作为 Addition Suggestion 审批，再确认清单。
+- 自动保存与手动保存都写入本机 SQLite；阶段、选中对象、清单、审批、复审及历史版本可恢复。浏览器只备份未提交草稿，冲突时停止自动覆盖。
+- JSON 导入先校验与预览，明确确认后替换 Working Blueprint；未知字段和不支持的 Schema Version 会被拒绝。导出包括所有创作实体与 Workflow 状态。
+- Create Version 保存不可变快照；Finalize 还要求全部阶段确认、最新检查通过且没有 ERROR。历史只能查看、比较或复制为新的 Working Blueprint。
+
+当前提供一个本地 Working Blueprint。生成时先取消才能修改内容；服务重启保留原内容并恢复中断状态，不自动重发 AI 请求。单项生成超时 120 秒，Blueprint 保存 / 导入上限 5 MiB，总章节上限 500。缩减已有创作的卷章会被保护性拒绝；直接重新规划已有详情的清单也会被拒绝，可用手动清单编辑或新增建议继续调整。
+
+本阶段仅产出游戏开始前的静态 Blueprint；尚未实现正式 Runtime、Character Agent、时间 Tick、动态 Scene、玩家存档或实际游戏流程。实现、验证与取舍见 [前置创作技术文档](doc/技术方案/前置创作/2026-10-08-前置创作Workflow实现.md)。
+
+## 开发验证
+
+```powershell
+npm run typecheck
+npm test
+npm run build
+```
+
+测试使用 Node 内置测试运行器、隔离 SQLite 与本机模型响应夹具，不修改真实 Provider 配置；模拟通过不代表真实服务商、账号或叙事质量已验证。数据库结构沿用 `src/server/db/migrations.ts` 的启动迁移，新增表会在服务启动时创建，无需为 Workflow 单独运行 Drizzle Kit 迁移。
 
 ## 项目结构
 

@@ -5,7 +5,7 @@ import {
   storyInputSchema, validateBlueprintStructure, workflowCommandSchema,
 } from "./workflow.js";
 import type {
-  Blueprint, Content, EntityKind, OutlinePlan, ReviewIssue,
+  Blueprint, Content, EntityKind, OutlineItem, OutlinePlan, ReviewIssue,
   StageId, StageStatus, WorkflowCommand, WorkflowEntity,
 } from "./workflow.js";
 
@@ -67,7 +67,7 @@ function enabledEntity(blueprint: Blueprint, row: WorkflowEntity): boolean {
   return !plan || plan.items.some((item) => item.id === row.id && item.enabled);
 }
 function requirePrecedingStages(blueprint: Blueprint, stage: StageId): void {
-  if (stageIds.slice(0, stageIndex(stage)).some((id) => !blueprint.workflowState.stageConfirmations[id])) throw new WorkflowError("请先确认所有前置阶段");
+  if (stageIds.slice(0, stageIndex(stage)).some((id) => !blueprint.workflowState.stageConfirmations[id] || !stageComplete(blueprint, id))) throw new WorkflowError("请先确认所有前置阶段");
 }
 function requireEditable(blueprint: Blueprint): void {
   if (blueprint.workflowState.activeGeneration) throw new WorkflowError("当前存在正在生成的对象，请等待或取消后编辑");
@@ -145,6 +145,7 @@ function requiredContentErrors(blueprint: Blueprint, row: WorkflowEntity): strin
 }
 function configureStructure(blueprint: Blueprint, counts: number[]): void {
   storyInputSchema.parse({ ...blueprint.storyInput, volumeChapterCounts: counts });
+  const previousCounts = blueprint.storyInput.volumeChapterCounts;
   const desired = new Map<string, number>();
   counts.forEach((count, index) => desired.set(blueprint.volumes[index]?.id ?? `volume-${index + 1}`, count));
   const removedVolumes = blueprint.volumes.slice(counts.length);
@@ -154,6 +155,7 @@ function configureStructure(blueprint: Blueprint, counts: number[]): void {
   if (related.some((row) => row.status !== "DRAFT" || row.revision > 0)) throw new WorkflowError("缩减卷章会移除已有创作内容，请先保留版本；当前仅允许移除未生成的空白结构");
   blueprint.volumes = counts.map((_, index) => {
     const row = blueprint.volumes[index] ?? entity("volume", `volume-${index + 1}`, `第 ${index + 1} 卷`);
+    if (previousCounts[index] !== counts[index] && row.status !== "DRAFT") { row.status = "NEEDS_REVIEW"; row.reviewReasons = [...new Set([...row.reviewReasons, "本卷章节数量已修改"])]; }
     row.content.volumeNumber = index + 1; return row;
   });
   const oldChapters = blueprint.chapters;
@@ -168,6 +170,10 @@ function configureStructure(blueprint: Blueprint, counts: number[]): void {
   blueprint.workflowState.outlinePlans = blueprint.workflowState.outlinePlans.filter((plan) => plan.stageId !== "branches" || chapterIds.has(plan.parentId ?? ""));
   for (const chapter of blueprint.chapters) if (!blueprint.workflowState.outlinePlans.some((plan) => plan.stageId === "branches" && plan.parentId === chapter.id)) blueprint.workflowState.outlinePlans.push(outline("branches", chapter.id));
   blueprint.storyInput.volumeChapterCounts = counts;
+  for (const plan of blueprint.workflowState.outlinePlans) if (plan.status !== "DRAFT" && plan.items.some((item) => item.volumeNumbers.some((number) => number > counts.length))) {
+    plan.status = "NEEDS_REVIEW"; plan.reviewReasons = [...new Set([...plan.reviewReasons, "规划中的预计卷号超出新的卷数，请核对清单"])];
+    for (const stage of stageIds.slice(stageIndex(plan.stageId))) blueprint.workflowState.stageConfirmations[stage] = false;
+  }
   if (blueprint.workflowState.selectedObjectId && !allEntities(blueprint).some((row) => row.id === blueprint.workflowState.selectedObjectId) && !blueprint.workflowState.outlinePlans.some((row) => row.id === blueprint.workflowState.selectedObjectId)) blueprint.workflowState.selectedObjectId = null;
   refreshDependencies(blueprint);
 }
@@ -193,6 +199,8 @@ function stageComplete(blueprint: Blueprint, stage: StageId): boolean {
   if (stage === "chapters" && (!blueprint.volumes.length || !blueprint.chapters.length)) return false;
   if (stage === "characters" && !blueprint.relationships) return false;
   if (stage === "systems" && !blueprint.initialWorldState) return false;
+  const requiredItems = blueprint.workflowState.outlinePlans.filter((plan) => plan.stageId === stage).flatMap((plan) => plan.items.filter((item) => item.enabled && item.required).map((item) => ({ item, plan })));
+  if (requiredItems.some(({ item, plan }) => !allEntities(blueprint).some((row) => row.id === item.id && row.kind === item.kind && row.parentId === plan.parentId && row.status === "APPROVED"))) return false;
   const sequence = stageSequence(blueprint, stage);
   return sequence.length > 0 && sequence.filter((row) => sequenceRequired(blueprint, row)).every((row) => row.status === "APPROVED");
 }
@@ -214,6 +222,19 @@ function validateOutline(blueprint: Blueprint, plan: OutlinePlan): void {
   if (plan.items.some((item) => item.relatedIds.some((id) => !ids.has(id)))) throw new WorkflowError("规划项目包含不存在的引用");
   if (blueprint.storyInput.volumeChapterCounts.length && plan.items.some((item) => item.volumeNumbers.some((number) => number > blueprint.storyInput.volumeChapterCounts.length))) throw new WorkflowError("规划项目引用了未配置的卷");
 }
+function validateAdditionItem(blueprint: Blueprint, outlineId: string, item: OutlineItem): OutlinePlan {
+  const plan = findOutline(blueprint, outlineId);
+  if (item.kind !== plannedKinds[plan.stageId] || item.source !== "AI") throw new WorkflowError("新增建议必须符合指定清单类型及 AI 来源");
+  if (!item.purpose.trim()) throw new WorkflowError("新增建议必须说明目的");
+  if (item.relatedIds.some((id) => !allEntities(blueprint).some((row) => row.id === id && row.status === "APPROVED"))) throw new WorkflowError("新增建议只能引用已审批的现有内容");
+  if (blueprint.storyInput.volumeChapterCounts.length && item.volumeNumbers.some((number) => number > blueprint.storyInput.volumeChapterCounts.length)) throw new WorkflowError("新增建议引用了不存在的卷");
+  return plan;
+}
+function markOutlineContentsForReview(blueprint: Blueprint, plan: OutlinePlan, reason: string): void {
+  const ids = plan.items.map((item) => item.id);
+  for (const row of allEntities(blueprint).filter((row) => ids.includes(row.id) && row.status !== "DRAFT")) { row.status = "NEEDS_REVIEW"; row.reviewReasons = [...new Set([...row.reviewReasons, reason])]; }
+  propagateReview(blueprint, ids, reason);
+}
 function addOutlineEntities(blueprint: Blueprint, plan: OutlinePlan): void {
   const containers: Partial<Record<EntityKind, WorkflowEntity[]>> = { character: blueprint.characters, ending: blueprint.endings, criticalBranch: blueprint.criticalBranches, gameSystem: blueprint.gameSystems };
   for (const item of plan.items.filter((row) => row.enabled)) {
@@ -229,6 +250,11 @@ function addOutlineEntities(blueprint: Blueprint, plan: OutlinePlan): void {
 }
 function assertApprovalOrder(blueprint: Blueprint, targetId: string, stage: StageId): void {
   requirePrecedingStages(blueprint, stage);
+  const targetPlan = blueprint.workflowState.outlinePlans.find((plan) => plan.items.some((item) => item.id === targetId));
+  if (targetPlan) {
+    const targetIndex = targetPlan.items.findIndex((item) => item.id === targetId);
+    if (targetPlan.items.slice(0, targetIndex).some((item) => item.enabled && item.required && !allEntities(blueprint).some((row) => row.id === item.id && row.status === "APPROVED"))) throw new WorkflowError("请先审批之前的必需项目");
+  }
   const sequence = stageSequence(blueprint, stage);
   const index = sequence.findIndex((row) => row.id === targetId);
   if (index < 0) throw new WorkflowError("对象不在已启用的生成清单中");
@@ -274,6 +300,19 @@ export function applyWorkflowCommand(input: Blueprint, commandInput: WorkflowCom
     const plan = findOutline(blueprint, command.outlineId); assertApprovalOrder(blueprint, plan.id, plan.stageId);
     if (!["PENDING_REVIEW", "NEEDS_REVIEW"].includes(plan.status)) throw new WorkflowError("请先生成或编辑清单");
     validateOutline(blueprint, plan); plan.status = "APPROVED"; plan.reviewReasons = []; addOutlineEntities(blueprint, plan); touch(blueprint, plan.stageId);
+  } else if (command.type === "approveAddition" || command.type === "rejectAddition") {
+    const suggestion = blueprint.workflowState.additionSuggestions.find((row) => row.id === command.suggestionId);
+    if (!suggestion || suggestion.status !== "PENDING_REVIEW") throw new WorkflowError("新增建议不存在或已处理");
+    if (command.type === "rejectAddition") { suggestion.status = "REJECTED"; blueprint.metadata.updatedAt = now(); }
+    else {
+      const plan = validateAdditionItem(blueprint, suggestion.outlineId, suggestion.item);
+      if (plan.items.length >= 100) throw new WorkflowError("本清单已达到 100 项上限");
+      plan.items.push(suggestion.item); plan.status = "PENDING_REVIEW"; plan.userModified = true; plan.revision += 1;
+      suggestion.status = "APPROVED";
+      markOutlineContentsForReview(blueprint, plan, "用户批准了新增建议，生成清单已修改");
+      plan.status = "PENDING_REVIEW";
+      touch(blueprint, plan.stageId);
+    }
   } else if (command.type === "updateEntity") {
     const row = findEntity(blueprint, command.entityId);
     const content = contentSchemas[row.kind].parse(command.content) as Content;
@@ -332,20 +371,25 @@ export function beginGeneration(input: Blueprint, targetId: string, token: strin
   const plan = blueprint.workflowState.outlinePlans.find((row) => row.id === targetId);
   const row = targetId === "blueprint-review" ? blueprint.workflowState.review : plan ?? findEntity(blueprint, targetId);
   blueprint.workflowState.activeGeneration = { token, targetId, startedAt: now(), previousStatus: row.status };
+  blueprint.workflowState.generationError = null;
   row.status = "GENERATING"; blueprint.workflowState.selectedObjectId = targetId; blueprint.metadata.updatedAt = now();
   return blueprint;
 }
 
 const generatedOutlineItemSchema = outlineItemSchema.omit({ id: true, userModified: true });
 const outlineResultSchema = z.object({ items: z.array(generatedOutlineItemSchema).max(100) }).strict();
+const generatedAdditionSchema = z.object({ outlineId: z.string().min(1).max(100).regex(/^[a-zA-Z0-9_-]+$/), ...generatedOutlineItemSchema.extend({ source: z.literal("AI") }).shape }).strict();
 const reviewResultSchema = z.object({ issues: z.array(reviewIssueSchema.omit({ id: true })).max(1000) }).strict();
+function entityResultSchema(kind: EntityKind): z.ZodType {
+  return z.object({ content: contentSchemas[kind], additionSuggestions: z.array(generatedAdditionSchema).max(30).optional() }).strict();
+}
 export function getGenerationTarget(blueprint: Blueprint, targetId: string): { kind: "outline" | "entity" | "review"; schema: z.ZodType; context: unknown; prompt: string } {
-  const sharedContext = { storyInput: blueprint.storyInput, approvedEntities: allEntities(blueprint).filter((row) => row.status === "APPROVED"), constraints: "仅进行游戏开始前的静态创作规划，不生成正文、对白、Runtime、Scene、Agent 或时间 Tick。引用必须使用已批准实体 ID。" };
+  const sharedContext = { storyInput: blueprint.storyInput, approvedEntities: allEntities(blueprint).filter((row) => row.status === "APPROVED" && enabledEntity(blueprint, row)), outlineScopes: blueprint.workflowState.outlinePlans.map((plan) => ({ id: plan.id, stageId: plan.stageId, parentId: plan.parentId, kind: plannedKinds[plan.stageId], items: plan.items })), constraints: "仅进行游戏开始前的静态创作规划，不生成正文、对白、Runtime、Scene、Agent 或时间 Tick。引用必须使用已批准且启用的实体 ID。未采用的可选草稿和已禁用人物不参与初始世界状态。" };
   if (targetId === "blueprint-review") return { kind: "review", schema: reviewResultSchema, context: { ...sharedContext, checks: runBlueprintChecks(blueprint) }, prompt: "检查故事、人物、结局、关键分支、伏笔和章节一致性。仅返回 issues；ERROR 是阻塞问题，WARNING 是风险，SUGGESTION 是优化建议。不要生成新的主要内容。" };
   const plan = blueprint.workflowState.outlinePlans.find((row) => row.id === targetId);
   if (plan) return { kind: "outline", schema: outlineResultSchema, context: { ...sharedContext, stageId: plan.stageId, parentId: plan.parentId, existingItems: plan.items }, prompt: `只规划 ${plan.name}，项目类型固定为 ${plannedKinds[plan.stageId]}，作用范围固定为当前阶段/章节。每个项目说明目的与引用，用户预设用 USER 来源，建议新增用 AI 来源。不生成详情，不返回 ID 或审批状态。分支可为空以表示本章无必要关键分支。系统可列 enabled=false 的不建议项目。` };
   const row = findEntity(blueprint, targetId);
-  return { kind: "entity", schema: z.object({ content: contentSchemas[row.kind] }).strict(), context: { ...sharedContext, target: row, outline: outlineForEntity(blueprint, row), fields: entityFields[row.kind] }, prompt: `只生成 ${row.name} (${row.kind}) 这一个审批单元。只返回 content，不改变名称、ID、父级、类型、清单或审批状态。填写所有必需字段，保持用户不可变事实。卷序号/章序号必须保持。关键分支每个选项包含实际效果；人物属性必须遵循其独立定义。` };
+  return { kind: "entity", schema: entityResultSchema(row.kind), context: { ...sharedContext, target: row, outline: outlineForEntity(blueprint, row), fields: entityFields[row.kind] }, prompt: `只生成 ${row.name} (${row.kind}) 这一个审批单元。返回 content，不改变名称、ID、父级、类型、清单或审批状态。填写所有必需字段，保持用户不可变事实。卷序号/章序号必须保持。关键分支每个选项包含实际效果；人物属性必须遵循其独立定义。如果确实发现需要新增清单项目，只能在可选 additionSuggestions 提出独立建议，outlineId 必须取已有清单作用范围，kind 必须匹配，source 必须 AI。不得返回项目 ID、详情或审批状态，不得直接扩张清单；用户先批准建议、再确认清单后才会创建草稿。` };
 }
 export function completeGeneration(input: Blueprint, targetId: string, result: unknown, token?: string): Blueprint {
   const active = input.workflowState.activeGeneration;
@@ -361,6 +405,11 @@ export function completeGeneration(input: Blueprint, targetId: string, result: u
   } else if (plan) {
     const generated = outlineResultSchema.parse(result);
     if (generated.items.some((item) => item.kind !== plannedKinds[plan.stageId])) throw new WorkflowError("AI 规划输出越过了本阶段类型范围");
+    const previousIds = new Set(plan.items.map((item) => item.id));
+    if (allEntities(blueprint).some((row) => previousIds.has(row.id) && (row.status !== "DRAFT" || row.revision > 0))) throw new WorkflowError("清单详情已有内容，不能用重新规划替换已创作范围");
+    if (allEntities(blueprint).some((row) => !previousIds.has(row.id) && contentReferenceIds(row).some((id) => previousIds.has(id)))) throw new WorkflowError("旧清单项目仍被其他内容引用，请先处理引用再重新规划");
+    // Regeneration is allowed only before any detail is authored; remove its obsolete blank slots.
+    blueprint.characters = blueprint.characters.filter((row) => !previousIds.has(row.id)); blueprint.endings = blueprint.endings.filter((row) => !previousIds.has(row.id)); blueprint.criticalBranches = blueprint.criticalBranches.filter((row) => !previousIds.has(row.id)); blueprint.gameSystems = blueprint.gameSystems.filter((row) => !previousIds.has(row.id));
     plan.items = generated.items.map((item) => ({ ...item, id: newId(item.kind), userModified: false })); plan.revision += 1; plan.status = "PENDING_REVIEW"; plan.userModified = false; plan.reviewReasons = [];
     if (plan.stageId === "characters") {
       for (const name of blueprint.storyInput.presetCharacters as string[]) {
@@ -372,13 +421,21 @@ export function completeGeneration(input: Blueprint, targetId: string, result: u
     validateOutline(blueprint, plan); touch(blueprint, plan.stageId);
   } else {
     const row = findEntity(blueprint, targetId);
-    const parsed = z.object({ content: contentSchemas[row.kind] }).strict().parse(result);
+    const parsed = entityResultSchema(row.kind).parse(result) as { content: Content; additionSuggestions?: z.infer<typeof generatedAdditionSchema>[] };
     if ((row.kind === "volume" && parsed.content.volumeNumber !== row.content.volumeNumber) || (row.kind === "chapter" && parsed.content.chapterNumber !== row.content.chapterNumber)) throw new WorkflowError("AI 输出不得改变固定卷章结构");
     row.content = parsed.content as WorkflowEntity["content"]; row.revision += 1; row.status = "PENDING_REVIEW"; row.reviewReasons = [];
     const contentErrors = requiredContentErrors(blueprint, row); if (contentErrors.length) throw new WorkflowError(`AI 生成内容不完整：${contentErrors.join("；")}`);
+    if (blueprint.workflowState.additionSuggestions.length + (parsed.additionSuggestions?.length ?? 0) > 1000) throw new WorkflowError("新增建议已达到 1000 项上限，请先整理项目");
+    for (const addition of parsed.additionSuggestions ?? []) {
+      const { outlineId, ...itemData } = addition;
+      const item: OutlineItem = { ...itemData, id: newId(itemData.kind), userModified: false };
+      validateAdditionItem(blueprint, outlineId, item);
+      blueprint.workflowState.additionSuggestions.push({ id: newId("suggestion"), outlineId, item, status: "PENDING_REVIEW" });
+    }
     propagateReview(blueprint, [row.id], `${row.name} 已重新生成`); touch(blueprint, entityStages[row.kind]);
   }
   blueprint.workflowState.activeGeneration = null; refreshDependencies(blueprint); blueprint.metadata.updatedAt = now();
+  blueprint.workflowState.generationError = null;
   const errors = validateBlueprintStructure(blueprint); if (errors.length) throw new WorkflowError(errors.join("；"));
   return blueprint;
 }
@@ -389,9 +446,12 @@ export function failGeneration(input: Blueprint, reason = "生成失败，请重
   const target = active.targetId === "blueprint-review" ? blueprint.workflowState.review : plan ?? findEntity(blueprint, active.targetId);
   target.status = active.previousStatus;
   if ("reviewReasons" in target) target.reviewReasons = [...new Set([...target.reviewReasons, reason])];
+  blueprint.workflowState.generationError = reason;
   blueprint.workflowState.activeGeneration = null; blueprint.metadata.updatedAt = now(); return blueprint;
 }
-export const cancelGeneration = failGeneration;
+export function cancelGeneration(input: Blueprint): Blueprint {
+  return failGeneration(input, "生成已取消，原有内容已保留。");
+}
 
 export function runBlueprintChecks(blueprint: Blueprint): ReviewIssue[] {
   const issues: ReviewIssue[] = [];

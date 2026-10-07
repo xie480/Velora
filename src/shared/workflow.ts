@@ -87,7 +87,7 @@ export interface StoryInput {
   forbiddenChanges: string[]; expectedLength: string; notes: string; volumeChapterCounts: number[];
 }
 export const storyInputSchema: z.ZodType<StoryInput> = z.object({
-  ...Object.fromEntries(storyInputFields.map((field) => [field.key, field.type === "textList" ? textList.default([]) : prose.default("")])),
+  ...Object.fromEntries(storyInputFields.map((field) => [field.key, field.key === "name" ? shortText.default("") : field.type === "textList" ? textList.default([]) : prose.default("")])),
   volumeChapterCounts: z.array(z.number().int().min(1).max(100)).max(30).default([]),
 }).strict().refine((value) => value.volumeChapterCounts.reduce((sum, n) => sum + n, 0) <= 500, "总章节数不能超过 500") as unknown as z.ZodType<StoryInput>;
 
@@ -100,6 +100,8 @@ export const outlineItemSchema = z.object({ id: idSchema, name: shortText.min(1)
 export type OutlineItem = z.infer<typeof outlineItemSchema>;
 export const outlinePlanSchema = z.object({ id: idSchema, stageId: z.enum(stageIds), type: z.literal("AI_PLANNED"), parentId: idSchema.nullable(), name: shortText, status: z.enum(approvalStatuses), revision: z.number().int().min(0), userModified: z.boolean(), reviewReasons: textList, items: z.array(outlineItemSchema).max(100), dependencies: idList }).strict();
 export type OutlinePlan = z.infer<typeof outlinePlanSchema>;
+export const additionSuggestionSchema = z.object({ id: idSchema, outlineId: idSchema, item: outlineItemSchema, status: z.enum(["PENDING_REVIEW", "APPROVED", "REJECTED"]) }).strict();
+export type AdditionSuggestion = z.infer<typeof additionSuggestionSchema>;
 export const reviewIssueSchema = z.object({ id: idSchema, severity: z.enum(["ERROR", "WARNING", "SUGGESTION"]), category: z.enum(["Story", "Characters", "Ending", "Branch", "Foreshadowing", "Chapter", "System", "Workflow"]), message: prose.min(1), entityIds: idList, suggestion: prose }).strict();
 export type ReviewIssue = z.infer<typeof reviewIssueSchema>;
 const reviewSchema = z.object({ status: z.enum(approvalStatuses), basedOnContentRevision: z.number().int().min(0).nullable(), issues: z.array(reviewIssueSchema).max(1000), reviewedAt: z.string().nullable() }).strict();
@@ -108,7 +110,7 @@ export const blueprintSchema = z.object({
   schemaVersion: z.literal(BLUEPRINT_SCHEMA_VERSION), blueprintVersion: z.number().int().min(0),
   metadata: z.object({ id: idSchema, title: shortText, createdAt: z.string(), updatedAt: z.string(), parentVersion: z.number().int().min(1).nullable(), description: prose, userNote: prose }).strict(),
   storyInput: storyInputSchema,
-  workflowState: z.object({ currentStage: z.enum(stageIds), selectedObjectId: idSchema.nullable(), contentRevision: z.number().int().min(0), stageConfirmations: z.object(Object.fromEntries(stageIds.map((id) => [id, z.boolean()])) as Record<StageId, z.ZodBoolean>).strict(), outlinePlans: z.array(outlinePlanSchema).max(503), review: reviewSchema, activeGeneration: generationSchema.nullable() }).strict(),
+  workflowState: z.object({ currentStage: z.enum(stageIds), selectedObjectId: idSchema.nullable(), contentRevision: z.number().int().min(0), stageConfirmations: z.object(Object.fromEntries(stageIds.map((id) => [id, z.boolean()])) as Record<StageId, z.ZodBoolean>).strict(), outlinePlans: z.array(outlinePlanSchema).max(503), additionSuggestions: z.array(additionSuggestionSchema).max(1000).default([]), review: reviewSchema, activeGeneration: generationSchema.nullable(), generationError: prose.nullable().default(null) }).strict(),
   storyBible: entitySchema, characters: z.array(entitySchema).max(100), relationships: entitySchema.nullable(), endings: z.array(entitySchema).max(100), volumes: z.array(entitySchema).max(30), chapters: z.array(entitySchema).max(500), chapterCharacterPlans: z.array(entitySchema).max(500), criticalBranches: z.array(entitySchema).max(5000), gameSystems: z.array(entitySchema).max(100), initialWorldState: entitySchema.nullable(),
 }).strict();
 export type Blueprint = z.infer<typeof blueprintSchema>;
@@ -118,6 +120,8 @@ export const workflowCommandSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("select"), stageId: z.enum(stageIds), objectId: idSchema.nullable() }).strict(),
   z.object({ type: z.literal("updateOutline"), outlineId: idSchema, items: z.array(outlineItemSchema).max(100) }).strict(),
   z.object({ type: z.literal("approveOutline"), outlineId: idSchema }).strict(),
+  z.object({ type: z.literal("approveAddition"), suggestionId: idSchema }).strict(),
+  z.object({ type: z.literal("rejectAddition"), suggestionId: idSchema }).strict(),
   z.object({ type: z.literal("updateEntity"), entityId: idSchema, name: shortText.min(1), content: z.record(z.string(), z.json()) }).strict(),
   z.object({ type: z.literal("approveEntity"), entityId: idSchema }).strict(),
   z.object({ type: z.literal("rejectEntity"), entityId: idSchema, reason: prose.min(1) }).strict(),
@@ -180,6 +184,11 @@ export function contentReferenceIds(entity: WorkflowEntity): string[] {
   if (entity.kind === "initialWorldState") ids.push(...Object.keys((entity.content.characterLocations ?? {}) as object), ...Object.keys((entity.content.characterAttributes ?? {}) as object));
   return [...new Set(ids)];
 }
+/** Unadopted optional drafts and disabled retained characters do not participate in the initial world. */
+export function activeApprovedCharacters(blueprint: Blueprint): WorkflowEntity[] {
+  const enabledIds = new Set(blueprint.workflowState.outlinePlans.filter((plan) => plan.stageId === "characters").flatMap((plan) => plan.items.filter((item) => item.enabled).map((item) => item.id)));
+  return blueprint.characters.filter((character) => character.status === "APPROVED" && enabledIds.has(character.id));
+}
 export function entityApprovalErrors(blueprint: Blueprint, entity: WorkflowEntity): string[] {
   const parsed = contentSchemas[entity.kind].safeParse(entity.content);
   if (!parsed.success) return parsed.error.issues.map((issue) => `${issue.path.join(".")}: ${issue.message}`);
@@ -227,7 +236,7 @@ export function entityApprovalErrors(blueprint: Blueprint, entity: WorkflowEntit
     if (!locations.includes(entity.content.initialLocation as string)) errors.push("初始地点必须在可访问地点清单中");
     const characterLocations = entity.content.characterLocations as Record<string, string>;
     const characterAttributes = entity.content.characterAttributes as Record<string, Record<string, number>>;
-    for (const character of blueprint.characters) {
+    for (const character of activeApprovedCharacters(blueprint)) {
       if (!characterLocations[character.id]?.trim()) errors.push(`缺少 ${character.name} 的初始所在地`);
       const definitions = character.content.dynamicAttributes as Array<{ key: string; min: number; max: number }>;
       for (const definition of definitions) {
@@ -261,6 +270,17 @@ export function validateBlueprintStructure(blueprint: Blueprint): string[] {
   for (const stage of ["characters", "endings", "systems"] as const) if (plans.filter((plan) => plan.stageId === stage).length !== 1) errors.push(`${stage}: 必须保留唯一的阶段规划清单`);
   const plannedItems = plans.flatMap((plan) => plan.items.map((item) => ({ item, plan })));
   if (new Set(plannedItems.map(({ item }) => item.id)).size !== plannedItems.length) errors.push("不同清单的项目 ID 不能重复");
+  const suggestions = blueprint.workflowState.additionSuggestions;
+  const reservedIds = new Set([...ids, ...plans.map((plan) => plan.id), ...plannedItems.map(({ item }) => item.id), "blueprint-review"]);
+  if (new Set(suggestions.map((suggestion) => suggestion.id)).size !== suggestions.length || suggestions.some((suggestion) => reservedIds.has(suggestion.id))) errors.push("新增建议 ID 重复或占用现有对象 ID");
+  if (new Set(suggestions.flatMap((suggestion) => [suggestion.id, suggestion.item.id])).size !== suggestions.length * 2) errors.push("新增建议与建议项目 ID 重复");
+  for (const suggestion of suggestions) {
+    const plan = plans.find((row) => row.id === suggestion.outlineId);
+    if (!plan || suggestion.item.kind !== expectedPlan[plan.stageId] || suggestion.item.source !== "AI") errors.push("新增建议的清单范围、实体类型或来源无效");
+    const membership = plannedItems.find(({ item }) => item.id === suggestion.item.id);
+    if (reservedIds.has(suggestion.item.id) && !(suggestion.status === "APPROVED" && membership?.plan.id === suggestion.outlineId)) errors.push("新增建议项目 ID 与现有对象冲突");
+    for (const id of suggestion.item.relatedIds) if (!ids.has(id)) errors.push(`${suggestion.item.name}: 新增建议引用不存在`);
+  }
   for (const plan of plans) {
     if (!expectedPlan[plan.stageId] || plan.items.some((item) => item.kind !== expectedPlan[plan.stageId])) errors.push(`${plan.name}: 清单与阶段类型不匹配`);
     if ((plan.stageId === "branches") !== Boolean(plan.parentId) || (plan.parentId && !blueprint.chapters.some((chapter) => chapter.id === plan.parentId))) errors.push(`${plan.name}: 章节范围无效`);
@@ -269,6 +289,7 @@ export function validateBlueprintStructure(blueprint: Blueprint): string[] {
     for (const item of plan.items) {
       if (item.id === plan.id || item.id === "blueprint-review") errors.push(`${plan.name}: 非法项目 ID`);
       for (const id of item.relatedIds) if (!ids.has(id)) errors.push(`${item.name}: 无效清单引用 ${id}`);
+      if (plan.status === "APPROVED" && item.enabled && !entities.some((entity) => entity.id === item.id && entity.kind === item.kind && entity.parentId === plan.parentId)) errors.push(`${item.name}: 已确认清单缺少对应实体`);
     }
   }
   for (const entity of entities.filter((row) => ["character", "ending", "criticalBranch", "gameSystem"].includes(row.kind))) {
