@@ -62,6 +62,18 @@ try {
   app.route("/api/providers", unavailableProviderRoutes);
 }
 
+try {
+  const { workflowRoutes, recoverInterruptedWorkflow } = await import("./routes/workflow.js");
+  recoverInterruptedWorkflow();
+  app.route("/api/workflow", workflowRoutes);
+} catch {
+  const unavailableWorkflowRoutes = new Hono();
+  unavailableWorkflowRoutes.all("*", (context) =>
+    context.json({ error: "SQLite 或本地 Blueprint 未能初始化，前置创作暂不可用。" }, 503),
+  );
+  app.route("/api/workflow", unavailableWorkflowRoutes);
+}
+
 app.all("/api/*", (context) => context.json({ error: "API route not found." }, 404));
 
 const clientDirectory = resolve(process.cwd(), "dist/client");

@@ -7,6 +7,7 @@ import {
   sqliteTable,
   text,
   uniqueIndex,
+  type AnySQLiteColumn,
 } from "drizzle-orm/sqlite-core";
 import { sql } from "drizzle-orm";
 
@@ -83,5 +84,43 @@ export const providerProfiles = sqliteTable(
       .on(table.isActive)
       .where(sql`${table.isActive} = 1`),
     index("provider_profiles_provider_type").on(table.providerType),
+  ],
+);
+
+/** Current editable Blueprint. Revision is the compare-and-swap token used by every write. */
+export const workflowWorking = sqliteTable(
+  "workflow_working",
+  {
+    id: text("id").primaryKey(),
+    revision: integer("revision").notNull().default(0),
+    blueprintJson: text("blueprint_json").notNull(),
+    updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull(),
+  },
+  (table) => [
+    check("workflow_working_singleton", sql`${table.id} = 'working'`),
+    check("workflow_working_revision", sql`${table.revision} >= 0`),
+    check("workflow_working_json", sql`json_valid(${table.blueprintJson})`),
+  ],
+);
+
+/** Immutable finalized or manually created snapshots; SQLite triggers guard UPDATE and DELETE. */
+export const workflowVersions = sqliteTable(
+  "workflow_versions",
+  {
+    version: integer("version").primaryKey(),
+    parentVersion: integer("parent_version").references((): AnySQLiteColumn => workflowVersions.version),
+    createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
+    description: text("description").notNull(),
+    userNote: text("user_note").notNull(),
+    finalized: integer("finalized", { mode: "boolean" }).notNull().default(false),
+    workflowStateJson: text("workflow_state_json").notNull(),
+    blueprintJson: text("blueprint_json").notNull(),
+  },
+  (table) => [
+    check("workflow_versions_positive", sql`${table.version} > 0`),
+    check("workflow_versions_parent", sql`${table.parentVersion} IS NULL OR ${table.parentVersion} < ${table.version}`),
+    check("workflow_versions_finalized", sql`${table.finalized} IN (0, 1)`),
+    check("workflow_versions_state_json", sql`json_valid(${table.workflowStateJson})`),
+    check("workflow_versions_blueprint_json", sql`json_valid(${table.blueprintJson})`),
   ],
 );
