@@ -3,11 +3,12 @@ import { resolve } from "node:path";
 import { serve } from "@hono/node-server";
 import { serveStatic } from "@hono/node-server/serve-static";
 import { Hono } from "hono";
+import { localApiPort } from "./services/config.js";
 import { getDiagnosticReport } from "./services/diagnostics.js";
 import { preloadLocalEmbeddingModel } from "./services/localEmbedding.js";
 
 const host = "127.0.0.1";
-const port = 4310;
+const port = localApiPort;
 const app = new Hono();
 
 try {
@@ -15,8 +16,6 @@ try {
 } catch {
   console.error("SQLite/Drizzle initialization failed; local diagnostics remain available.");
 }
-
-preloadLocalEmbeddingModel();
 
 const allowedHosts = new Set([`${host}:${port}`, `localhost:${port}`]);
 const allowedOrigins = new Set([
@@ -69,8 +68,18 @@ if (existsSync(clientIndex)) {
   app.get("*", (context) => context.html(readFileSync(clientIndex, "utf8")));
 }
 
-const server = serve({ fetch: app.fetch, hostname: host, port });
-console.info(`Project Chronicle local API listening at http://${host}:${port}`);
+const server = serve({ fetch: app.fetch, hostname: host, port }, (address) => {
+  console.info(`Project Chronicle local API listening at http://${host}:${address.port}`);
+  preloadLocalEmbeddingModel();
+});
+server.on("error", (error: NodeJS.ErrnoException) => {
+  if (error.code === "EADDRINUSE") {
+    console.error(`Project Chronicle local API cannot bind ${host}:${port}; set API_PORT in .env to an available port.`);
+  } else {
+    console.error(`Project Chronicle local API failed to listen: ${error.code ?? error.name}.`);
+  }
+  process.exitCode = 1;
+});
 
 function shutdown(): void {
   server.close(() => {

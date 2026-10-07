@@ -10,12 +10,13 @@ import {
 import { sqlite } from "../db/index.js";
 import { decryptSecret, encryptSecret } from "./secretVault.js";
 import { getProviderProfileRow } from "./providerProfiles.js";
+import { localApiPort } from "./config.js";
 
 const openAIssuer = "https://auth.openai.com";
 const authorizeEndpoint = `${openAIssuer}/api/accounts/authorize`;
 const tokenEndpoint = `${openAIssuer}/api/accounts/oauth/token`;
 const resource = "https://api.openai.com/v1";
-const callbackUri = "http://127.0.0.1:4310/api/providers/chatgpt/callback";
+const callbackUri = `http://127.0.0.1:${localApiPort}/api/providers/chatgpt/callback`;
 const requiredScopes = [
   "openid",
   "profile",
@@ -28,8 +29,8 @@ const initialClientId = "dynamic_agent_client";
 const allowedReturnOrigins = new Set([
   "http://127.0.0.1:5173",
   "http://localhost:5173",
-  "http://127.0.0.1:4310",
-  "http://localhost:4310",
+  `http://127.0.0.1:${localApiPort}`,
+  `http://localhost:${localApiPort}`,
 ]);
 
 interface PendingAuthorization {
@@ -97,7 +98,7 @@ function getOrCreateHostId(): string {
 }
 
 function safeReturnOrigin(value: string | undefined): string {
-  return value && allowedReturnOrigins.has(value) ? value : "http://127.0.0.1:4310";
+  return value && allowedReturnOrigins.has(value) ? value : `http://127.0.0.1:${localApiPort}`;
 }
 
 function encodeBase64Url(value: Buffer): string {
