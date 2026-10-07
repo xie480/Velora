@@ -50,12 +50,42 @@
 .workflow-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 17px; }
 .workflow-field { display: flex; min-width: 0; flex-direction: column; gap: 8px; }
 .workflow-field--wide { grid-column: 1 / -1; }
-.workflow-field > span:first-child { color: var(--text-secondary); font-size: 12px; font-weight: 500; }
-.workflow-field > small { color: var(--text-muted); font-size: 10px; line-height: 1.6; }
+.workflow-field > span:first-child { color: var(--text-secondary); font-size: 13px; font-weight: 500; }
+.workflow-field > label > span { color: var(--text-secondary); font-size: 13px; font-weight: 500; }
+.workflow-field > small { color: var(--text-muted); font-size: 12px; line-height: 1.7; }
 .workflow-input, .workflow-textarea, .workflow-select { width: 100%; min-width: 0; padding: 10px 11px; border: 1px solid rgba(115, 137, 168, .25); border-radius: 8px; color: var(--text-primary); background: rgba(7, 13, 24, .65); font: 12px/1.65 inherit; transition: border-color 160ms ease, box-shadow 160ms ease; }
 .workflow-input { min-height: 38px; }
-.workflow-input, .workflow-select { font-family: inherit; font-size: 12px; line-height: 1.65; }
-.workflow-textarea { min-height: 106px; resize: vertical; font-family: inherit; font-size: 12px; line-height: 1.7; }
+.workflow-field .workflow-textarea--entry { min-height: 52px; }
+.workflow-form-tabs { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px; margin-bottom: 20px; }
+.workflow-form-tab { display: flex; align-items: flex-start; flex-direction: column; gap: 7px; padding: 13px 15px; border: 1px solid var(--border-soft); border-radius: 9px; color: var(--text-secondary); background: rgba(9, 15, 26, .4); text-align: left; cursor: pointer; font-size: 13px; }
+.workflow-form-tab span { color: var(--text-muted); font-size: 10px; line-height: 1.6; }
+.workflow-form-tab--active { color: var(--accent); border-color: rgba(114, 221, 201, .4); background: rgba(114, 221, 201, .07); }
+.workflow-fill-selection { min-width: 0; margin: 16px 0; padding: 12px 10px; border: 1px solid var(--border-soft); border-radius: 9px; }
+.workflow-fill-selection legend { padding-inline: 6px; color: var(--text-secondary); font-size: 12px; }
+.workflow-fill-selection > small { display: block; margin-top: 13px; color: var(--text-muted); font-size: 12px; line-height: 1.7; }
+.workflow-fill-selection__fields { display: flex; flex-direction: column; align-items: stretch; gap: 5px; max-height: 320px; overflow: auto; margin-top: 12px; }
+.workflow-fill-selection__fields .workflow-checkbox { border: 0; padding: 6px 4px; line-height: 1.6; }
+.workflow-fill-selection .workflow-actions { flex-direction: row; }
+.workflow-fill-selection .workflow-actions button { width: auto; }
+.workflow-entries { display: flex; flex-direction: column; gap: 9px; }
+.workflow-entry { display: grid; grid-template-columns: 20px minmax(0, 1fr) 34px; align-items: start; gap: 7px; }
+.workflow-entry__index { padding-top: 10px; color: var(--text-muted); font: 10px var(--font-mono); text-align: center; }
+.workflow-entry .danger-icon-button { margin-top: 2px; }
+.workflow-entry-hint { display: block; color: var(--text-muted); font-size: 12px; line-height: 1.7; }
+.workflow-entries > .quiet-button { align-self: flex-start; }
+.workflow-structured { padding: 16px; border: 1px solid var(--border-soft); border-radius: 9px; background: rgba(7, 13, 24, .22); }
+.workflow-structured-row { margin-top: 8px; padding: 13px; border: 1px solid var(--border-soft); border-radius: 8px; background: rgba(13, 21, 35, .5); }
+.workflow-structured-row__heading { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 14px; }
+.workflow-structured-row__heading strong { color: var(--text-secondary); font-size: 12px; }
+.workflow-structured-row .workflow-field > span { color: var(--text-secondary); font-size: 13px; }
+.workflow-field > span, .workflow-field > label { overflow-wrap: anywhere; }
+.workflow-structured > .quiet-button, .workflow-keyvalues > .quiet-button { margin-top: 8px; align-self: flex-start; }
+.workflow-advanced { margin-top: 15px; border-top: 1px solid var(--border-soft); padding-top: 12px; }
+.workflow-advanced summary { color: var(--text-muted); font-size: 11px; cursor: pointer; }
+.workflow-advanced .workflow-textarea--json { margin-top: 10px; min-height: 230px; }
+.visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; }
+.workflow-input, .workflow-select { font-family: inherit; font-size: 13px; line-height: 1.65; }
+.workflow-textarea { min-height: 0; resize: vertical; font-family: inherit; font-size: 13px; line-height: 1.7; }
 .workflow-textarea--json { min-height: 320px; font: 11px/1.7 var(--font-mono); }
 .workflow-input:focus, .workflow-textarea:focus, .workflow-select:focus { outline: 0; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(114, 221, 201, .08); }
 .workflow-select { appearance: none; background-image: linear-gradient(45deg, transparent 50%, #8391a8 50%), linear-gradient(135deg, #8391a8 50%, transparent 50%); background-position: calc(100% - 16px) 16px, calc(100% - 12px) 16px; background-size: 4px 4px; background-repeat: no-repeat; padding-right: 28px; font-family: inherit; }
@@ -87,7 +117,7 @@
 .workflow-plan-row__top span { color: var(--text-muted); font-size: 10px; }
 .workflow-plan-row .workflow-fields { gap: 11px; }
 .workflow-checkboxes { display: flex; gap: 7px; flex-wrap: wrap; }
-.workflow-checkbox { display: inline-flex; align-items: center; gap: 6px; padding: 6px 8px; border: 1px solid var(--border-soft); border-radius: 6px; color: var(--text-secondary); font-size: 10px; }
+.workflow-checkbox { display: inline-flex; align-items: center; gap: 6px; padding: 6px 8px; border: 1px solid var(--border-soft); border-radius: 6px; color: var(--text-secondary); font-size: 12px; }
 .workflow-checkbox input { accent-color: var(--accent); }
 .workflow-links { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 10px; }
 .workflow-link { padding: 5px 7px; border: 1px solid rgba(167, 155, 255, .2); border-radius: 5px; color: var(--accent-violet); background: rgba(167, 155, 255, .04); cursor: pointer; font-size: 10px; }
