@@ -55,7 +55,7 @@ test("七阶段经真实 Workflow API 与 SQLite 完成 Finalize，导出重导�
     if (plan) {
       const kind = plan.stageId === "characters" ? "character" : plan.stageId === "endings" ? "ending" : plan.stageId === "branches" ? "criticalBranch" : "gameSystem";
       const names = kind === "character" ? ["Alice", "Bob"] : kind === "ending" ? ["Normal End"] : kind === "criticalBranch" ? ["是否公开照片"] : ["线索系统"];
-      return { items: names.map((name) => ({ name, kind, source: "AI", purpose: "推进调查线并为结局提供必要依据", required: true, enabled: true, relatedIds: [], volumeNumbers: [1] })) };
+      return { items: names.map((name) => ({ name, kind, source: "AI", purpose: "推进调查线并为结局提供必要依据", required: true, enabled: true, relatedIds: [] })) };
     }
     return { content: fixtureContent(blueprint, allEntities(blueprint).find((row) => row.id === targetId)!) };
   });

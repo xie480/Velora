@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const BLUEPRINT_SCHEMA_VERSION = 1;
+export const BLUEPRINT_SCHEMA_VERSION = 2;
 export const MAX_IMPORT_BYTES = 5 * 1024 * 1024;
 export const approvalStatuses = ["DRAFT", "GENERATING", "PENDING_REVIEW", "APPROVED", "NEEDS_REVIEW", "REJECTED"] as const;
 export const stageStatuses = ["NOT_STARTED", "PLANNING", "OUTLINE_REVIEW", "IN_PROGRESS", "READY_TO_CONFIRM", "CONFIRMED", "NEEDS_REVIEW"] as const;
@@ -20,6 +20,8 @@ export const stages: ReadonlyArray<{ id: StageId; name: string; type: StageType;
 ];
 export const entityKinds = ["storyBible", "character", "relationships", "ending", "volume", "chapter", "chapterCharacterPlan", "criticalBranch", "gameSystem", "initialWorldState"] as const;
 export type EntityKind = typeof entityKinds[number];
+const entityStageMap: Record<EntityKind, StageId> = { storyBible: "story", character: "characters", relationships: "characters", ending: "endings", volume: "chapters", chapter: "chapters", chapterCharacterPlan: "branches", criticalBranch: "branches", gameSystem: "systems", initialWorldState: "systems" };
+export function entityStage(kind: EntityKind): StageId { return entityStageMap[kind]; }
 export type Content = Record<string, z.infer<ReturnType<typeof z.json>>>;
 export interface FieldDefinition {
   key: string;
@@ -96,7 +98,7 @@ export const entitySchema = z.object({ id: idSchema, kind: z.enum(entityKinds), 
   if (!result.success) for (const issue of result.error.issues) context.addIssue({ code: "custom", path: ["content", ...issue.path], message: issue.message });
 });
 export type WorkflowEntity = z.infer<typeof entitySchema>;
-export const outlineItemSchema = z.object({ id: idSchema, name: shortText.min(1), kind: z.enum(["character", "ending", "criticalBranch", "gameSystem"]), source: z.enum(["USER", "AI"]), purpose: prose, required: z.boolean(), enabled: z.boolean(), relatedIds: idList, volumeNumbers: z.array(z.number().int().min(1).max(30)).max(30), userModified: z.boolean() }).strict();
+export const outlineItemSchema = z.object({ id: idSchema, name: shortText.min(1), kind: z.enum(["character", "ending", "criticalBranch", "gameSystem"]), source: z.enum(["USER", "AI"]), purpose: z.string().max(31_000), required: z.boolean(), enabled: z.boolean(), relatedIds: idList, userModified: z.boolean() }).strict();
 export type OutlineItem = z.infer<typeof outlineItemSchema>;
 export const outlinePlanSchema = z.object({ id: idSchema, stageId: z.enum(stageIds), type: z.literal("AI_PLANNED"), parentId: idSchema.nullable(), name: shortText, status: z.enum(approvalStatuses), revision: z.number().int().min(0), userModified: z.boolean(), reviewReasons: textList, items: z.array(outlineItemSchema).max(100), dependencies: idList }).strict();
 export type OutlinePlan = z.infer<typeof outlinePlanSchema>;
@@ -134,10 +136,82 @@ export interface WorkflowResponse { blueprint: Blueprint; revision: number; vers
 export interface VersionSnapshot extends VersionSummary { blueprint: Blueprint }
 export interface ImportPreview { valid: boolean; errors: string[]; warnings: string[]; summary: string[]; data?: Blueprint | StoryInput }
 
-/** Version dispatch is intentionally explicit: unknown future formats must not be silently coerced. */
+const legacyOutlineItemSchema = outlineItemSchema.extend({ purpose: prose, volumeNumbers: z.array(z.number().int().min(1).max(30)).max(30).default([]) });
+const legacyOutlinePlanSchema = outlinePlanSchema.extend({ items: z.array(legacyOutlineItemSchema).max(100) });
+const legacyBlueprintSchema = blueprintSchema.extend({ schemaVersion: z.literal(1), workflowState: blueprintSchema.shape.workflowState.extend({ outlinePlans: z.array(legacyOutlinePlanSchema).max(503), additionSuggestions: z.array(additionSuggestionSchema.extend({ item: legacyOutlineItemSchema })).max(1000).default([]) }) });
+/** Read old documents as a migrated projection. Callers retain immutable original snapshot bytes. */
 export function migrateBlueprint(data: unknown): unknown {
-  if (!data || typeof data !== "object" || (data as { schemaVersion?: unknown }).schemaVersion !== BLUEPRINT_SCHEMA_VERSION) throw new Error(`不支持此 Schema Version，当前支持 ${BLUEPRINT_SCHEMA_VERSION}`);
-  return data;
+  const version = data && typeof data === "object" ? (data as { schemaVersion?: unknown }).schemaVersion : null;
+  if (version === BLUEPRINT_SCHEMA_VERSION) return data;
+  if (version !== 1) throw new Error(`不支持此 Schema Version，当前支持 ${BLUEPRINT_SCHEMA_VERSION}，并可迁移旧版 1`);
+  const legacy = legacyBlueprintSchema.parse(data);
+  const changedItemIds = new Set<string>();
+  const changedPlanIds = new Set<string>();
+  const convertItem = (item: z.infer<typeof legacyOutlineItemSchema>, outlineId: string): OutlineItem => {
+    const { volumeNumbers, ...next } = item;
+    if (volumeNumbers.length) {
+      next.purpose = `${next.purpose}\n旧版出场意向：预计第 ${volumeNumbers.join("、")} 卷；此说明仅保留创作意向，不绑定卷章结构。`;
+      changedItemIds.add(item.id); changedPlanIds.add(outlineId);
+    }
+    return next;
+  };
+  const blueprint = blueprintSchema.parse({ ...legacy, schemaVersion: BLUEPRINT_SCHEMA_VERSION, workflowState: { ...legacy.workflowState, outlinePlans: legacy.workflowState.outlinePlans.map((plan) => ({ ...plan, items: plan.items.map((item) => convertItem(item, plan.id)) })), additionSuggestions: legacy.workflowState.additionSuggestions.map((suggestion) => ({ ...suggestion, item: convertItem(suggestion.item, suggestion.outlineId) })) } });
+  const active = blueprint.workflowState.activeGeneration;
+  if (active) {
+    const target = active.targetId === "blueprint-review" ? blueprint.workflowState.review : blueprint.workflowState.outlinePlans.find((plan) => plan.id === active.targetId) ?? allEntities(blueprint).find((entity) => entity.id === active.targetId);
+    if (target?.status === "GENERATING") target.status = active.previousStatus;
+    blueprint.workflowState.activeGeneration = null;
+    blueprint.workflowState.generationError = "旧版 Blueprint 已迁移，未完成生成已中断；原有内容已保留。";
+  }
+  const rows = allEntities(blueprint);
+  const byId = new Map(rows.map((entity) => [entity.id, entity]));
+  if ([...rows, ...blueprint.workflowState.outlinePlans].some((row) => row.dependencies.some((id) => !byId.has(id)))) throw new Error("旧版 Blueprint 存在悬空依赖，无法安全迁移");
+  const changedEntities = new Set<string>();
+  const markEntity = (entity: WorkflowEntity, reason: string): void => { entity.status = entity.status === "DRAFT" ? "DRAFT" : "NEEDS_REVIEW"; entity.reviewReasons = [...new Set([...entity.reviewReasons, reason])]; changedEntities.add(entity.id); };
+  for (const entity of rows) {
+    const rejected = entity.dependencies.filter((id) => { const target = byId.get(id); return target ? !canReferenceEntity(blueprint, entity, target) : false; });
+    if (rejected.length) markEntity(entity, `Schema v1 迁移：移除违反前置方向的依赖 ${rejected.join("、")}`);
+    if (changedItemIds.has(entity.id)) markEntity(entity, "Schema v1 迁移：旧版出场卷号已保留为文字意向，请重新审核");
+  }
+  for (const plan of blueprint.workflowState.outlinePlans) {
+    const rejected = plan.dependencies.filter((id) => { const target = byId.get(id); return target ? !canReferenceEntity(blueprint, plan, target) : false; });
+    for (const item of plan.items) {
+      const removed = item.relatedIds.filter((id) => { const target = byId.get(id); return target ? !canReferenceEntity(blueprint, plan, target) : false; });
+      if (!removed.length) continue;
+      item.relatedIds = item.relatedIds.filter((id) => !removed.includes(id));
+      changedPlanIds.add(plan.id);
+      plan.reviewReasons.push(`Schema v1 迁移：${item.name} 移除违反前置方向的关联 ${removed.join("、")}`);
+      const detail = byId.get(item.id); if (detail) markEntity(detail, "Schema v1 迁移：生成清单的前置关联已改变，请重新审核");
+    }
+    if (rejected.length) { changedPlanIds.add(plan.id); plan.reviewReasons.push(`Schema v1 迁移：移除违反前置方向的清单依赖 ${rejected.join("、")}`); }
+    if (changedPlanIds.has(plan.id)) {
+      plan.status = "NEEDS_REVIEW";
+      plan.reviewReasons = [...new Set([...plan.reviewReasons, "Schema v1 迁移：规划字段或关联方向已调整，请重新审核清单"])];
+    }
+  }
+  for (const suggestion of blueprint.workflowState.additionSuggestions) {
+    const plan = blueprint.workflowState.outlinePlans.find((row) => row.id === suggestion.outlineId);
+    if (!plan) continue;
+    const removed = suggestion.item.relatedIds.filter((id) => { const target = byId.get(id); return target ? !canReferenceEntity(blueprint, plan, target) : false; });
+    if (removed.length) {
+      suggestion.item.relatedIds = suggestion.item.relatedIds.filter((id) => !removed.includes(id));
+      suggestion.item.purpose += `\nSchema v1 迁移：移除违反前置方向的关联 ${removed.join("、")}，需按当前清单重新确认。`;
+      if (suggestion.status === "PENDING_REVIEW") { changedPlanIds.add(plan.id); plan.status = "NEEDS_REVIEW"; plan.reviewReasons = [...new Set([...plan.reviewReasons, "Schema v1 迁移：新增建议的前置关联已调整，请重新审核"])]; }
+    }
+  }
+  rebuildBlueprintDependencies(blueprint);
+  let earliest: number = stageIds.length;
+  for (const id of changedEntities) earliest = Math.min(earliest, stageIds.indexOf(entityStage(byId.get(id)!.kind)));
+  for (const plan of blueprint.workflowState.outlinePlans) if (changedPlanIds.has(plan.id)) earliest = Math.min(earliest, stageIds.indexOf(plan.stageId));
+  if (earliest < stageIds.length) {
+    for (const entity of rows) if (stageIds.indexOf(entityStage(entity.kind)) > earliest && entity.status !== "DRAFT") { entity.status = "NEEDS_REVIEW"; entity.reviewReasons = [...new Set([...entity.reviewReasons, "Schema v1 迁移：前置数据的关联规则已调整"])]; }
+    for (const plan of blueprint.workflowState.outlinePlans) if (stageIds.indexOf(plan.stageId) > earliest && plan.status !== "DRAFT") { plan.status = "NEEDS_REVIEW"; plan.reviewReasons = [...new Set([...plan.reviewReasons, "Schema v1 迁移：前置数据的关联规则已调整"])]; }
+    for (const stage of stageIds.slice(earliest)) blueprint.workflowState.stageConfirmations[stage] = false;
+    blueprint.workflowState.review.status = blueprint.workflowState.review.status === "DRAFT" ? "DRAFT" : "NEEDS_REVIEW";
+    blueprint.workflowState.review.basedOnContentRevision = null;
+    blueprint.workflowState.contentRevision += 1;
+  }
+  return blueprintSchema.parse(blueprint);
 }
 function unknownFields(schema: z.ZodType, value: unknown, path = ""): string[] {
   const parsed = schema.safeParse(value);
@@ -151,7 +225,8 @@ export function previewImport(kind: "story" | "blueprint", raw: unknown): Import
       if (new TextEncoder().encode(raw).byteLength > MAX_IMPORT_BYTES) throw new Error("JSON 文件超过 5 MiB");
       data = JSON.parse(raw);
     }
-    if (kind === "blueprint") migrateBlueprint(data);
+    const migrated = kind === "blueprint" && data && typeof data === "object" && (data as { schemaVersion?: unknown }).schemaVersion === 1;
+    if (kind === "blueprint") data = migrateBlueprint(data);
     const schema = kind === "story" ? storyInputSchema : blueprintSchema;
     const unknown = unknownFields(schema, data);
     const result = schema.safeParse(data);
@@ -164,7 +239,7 @@ export function previewImport(kind: "story" | "blueprint", raw: unknown): Import
     }
     const blueprint = result.data as Blueprint;
     const errors = validateBlueprintStructure(blueprint);
-    return { valid: errors.length === 0, errors, warnings: blueprint.workflowState.activeGeneration ? ["导入后将恢复未完成生成状态，不重放 AI 请求"] : [], summary: [`项目：${blueprint.metadata.title}`, `Schema v${blueprint.schemaVersion} / Blueprint v${blueprint.blueprintVersion}`, `人物 ${blueprint.characters.length} · 结局 ${blueprint.endings.length} · 章节 ${blueprint.chapters.length} · 分支 ${blueprint.criticalBranches.length}`, `阶段：${stages.find((stage) => stage.id === blueprint.workflowState.currentStage)?.name}`], ...(errors.length ? {} : { data: blueprint }) };
+    return { valid: errors.length === 0, errors, warnings: [...(migrated ? ["Schema v1 已迁移到 v2；旧出场卷号保留为文字意向，违反前置方向的关联被移除，受影响内容需重新审核"] : []), ...(blueprint.workflowState.activeGeneration ? ["导入后将恢复未完成生成状态，不重放 AI 请求"] : [])], summary: [`项目：${blueprint.metadata.title}`, `Schema v${blueprint.schemaVersion} / Blueprint v${blueprint.blueprintVersion}`, `人物 ${blueprint.characters.length} · 结局 ${blueprint.endings.length} · 章节 ${blueprint.chapters.length} · 分支 ${blueprint.criticalBranches.length}`, `阶段：${stages.find((stage) => stage.id === blueprint.workflowState.currentStage)?.name}`], ...(errors.length ? {} : { data: blueprint }) };
   } catch (error) {
     return { valid: false, errors: [error instanceof Error ? error.message : "JSON 无效"], warnings: [], summary: [] };
   }
@@ -172,6 +247,28 @@ export function previewImport(kind: "story" | "blueprint", raw: unknown): Import
 
 export function allEntities(blueprint: Blueprint): WorkflowEntity[] {
   return [blueprint.storyBible, ...blueprint.characters, ...(blueprint.relationships ? [blueprint.relationships] : []), ...blueprint.endings, ...blueprint.volumes, ...blueprint.chapters, ...blueprint.chapterCharacterPlans, ...blueprint.criticalBranches, ...blueprint.gameSystems, ...(blueprint.initialWorldState ? [blueprint.initialWorldState] : [])];
+}
+export type ReferenceOwner = WorkflowEntity | OutlinePlan;
+/** Formal references flow from an authoring unit to its established prerequisites. */
+export function canReferenceEntity(blueprint: Blueprint, owner: ReferenceOwner, target: WorkflowEntity): boolean {
+  if (owner.id === target.id) return false;
+  const ownerStage = "stageId" in owner ? owner.stageId : entityStage(owner.kind);
+  const targetStage = entityStage(target.kind);
+  if (stageIds.indexOf(targetStage) < stageIds.indexOf(ownerStage)) return true;
+  if (targetStage !== ownerStage) return false;
+  if ("stageId" in owner) return owner.stageId === "branches" && target.kind === "chapterCharacterPlan" && target.parentId === owner.parentId;
+  if (owner.kind === "relationships") return target.kind === "character";
+  if (owner.kind === "chapter") return target.kind === "volume" || (target.kind === "chapter" && blueprint.chapters.findIndex((row) => row.id === target.id) >= 0 && blueprint.chapters.findIndex((row) => row.id === target.id) < blueprint.chapters.findIndex((row) => row.id === owner.id));
+  if (owner.kind === "criticalBranch") return target.kind === "chapterCharacterPlan" && target.parentId === owner.parentId;
+  return owner.kind === "initialWorldState" && target.kind === "gameSystem";
+}
+export function allowedReferenceEntities(blueprint: Blueprint, owner: ReferenceOwner): WorkflowEntity[] {
+  return allEntities(blueprint).filter((target) => canReferenceEntity(blueprint, owner, target));
+}
+/** Canonical dependency caches contain prerequisite stages and the explicit supported local order. */
+export function rebuildBlueprintDependencies(blueprint: Blueprint): void {
+  for (const entity of allEntities(blueprint)) entity.dependencies = allowedReferenceEntities(blueprint, entity).map((row) => row.id);
+  for (const plan of blueprint.workflowState.outlinePlans) plan.dependencies = allowedReferenceEntities(blueprint, plan).map((row) => row.id);
 }
 export function contentReferenceIds(entity: WorkflowEntity): string[] {
   const ids = entityFields[entity.kind].filter((field) => field.type === "referenceList").flatMap((field) => (entity.content[field.key] ?? []) as string[]);
@@ -198,7 +295,11 @@ export function entityApprovalErrors(blueprint: Blueprint, entity: WorkflowEntit
     if (value === undefined || value === null || (typeof value === "string" && !value.trim()) || (Array.isArray(value) && value.length === 0) || (typeof value === "object" && !Array.isArray(value) && !Object.keys(value).length)) errors.push(`请填写 ${field.label}`);
   }
   const byId = new Map(allEntities(blueprint).map((row) => [row.id, row]));
-  for (const id of contentReferenceIds(entity)) if (!byId.has(id) || id === entity.id) errors.push(`引用不存在：${id}`);
+  for (const id of contentReferenceIds(entity)) {
+    const target = byId.get(id);
+    if (!target || id === entity.id) errors.push(`引用不存在：${id}`);
+    else if (!canReferenceEntity(blueprint, entity, target)) errors.push(`引用违反前置方向：${target.name}`);
+  }
   for (const field of entityFields[entity.kind].filter((field) => field.referenceKind)) for (const id of (entity.content[field.key] ?? []) as string[]) if (byId.get(id)?.kind !== field.referenceKind) errors.push(`${field.label} 的引用类型错误：${id}`);
   if (entity.kind === "character") {
     const attributes = entity.content.dynamicAttributes as Array<{ key: string }>;
@@ -255,10 +356,11 @@ export function validateBlueprintStructure(blueprint: Blueprint): string[] {
   const entities = allEntities(blueprint);
   const ids = new Set(entities.map((entity) => entity.id));
   const plans = blueprint.workflowState.outlinePlans;
-  if (ids.size !== entities.length || new Set([...ids, ...plans.map((plan) => plan.id), "blueprint-review"]).size !== entities.length + plans.length + 1) errors.push("实体 / 清单 ID 重复或占用保留 ID");
+  if (ids.size !== entities.length || new Set([...ids, ...plans.map((plan) => plan.id), "blueprint-review", "story-input"]).size !== entities.length + plans.length + 2) errors.push("实体 / 清单 ID 重复或占用保留 ID");
   for (const [kind, rows] of groups) for (const entity of rows) {
     if (entity.kind !== kind) errors.push(`${entity.name}: 实体类型与容器不匹配`);
     for (const id of [...entity.dependencies, ...contentReferenceIds(entity), ...(entity.parentId ? [entity.parentId] : [])]) if (!ids.has(id) || id === entity.id) errors.push(`${entity.name}: 无效引用 ${id}`);
+    for (const id of [...entity.dependencies, ...contentReferenceIds(entity), ...(entity.parentId ? [entity.parentId] : [])]) { const target = entities.find((row) => row.id === id); if (target && !canReferenceEntity(blueprint, entity, target)) errors.push(`${entity.name}: 引用违反前置方向 ${id}`); }
     for (const field of entityFields[kind].filter((field) => field.referenceKind)) for (const id of (entity.content[field.key] ?? []) as string[]) if (entities.find((row) => row.id === id)?.kind !== field.referenceKind) errors.push(`${entity.name}: ${field.key} 引用类型错误`);
     if (["chapter", "chapterCharacterPlan", "criticalBranch"].includes(kind)) {
       const parentKind = kind === "chapter" ? "volume" : "chapter";
@@ -271,7 +373,7 @@ export function validateBlueprintStructure(blueprint: Blueprint): string[] {
   const plannedItems = plans.flatMap((plan) => plan.items.map((item) => ({ item, plan })));
   if (new Set(plannedItems.map(({ item }) => item.id)).size !== plannedItems.length) errors.push("不同清单的项目 ID 不能重复");
   const suggestions = blueprint.workflowState.additionSuggestions;
-  const reservedIds = new Set([...ids, ...plans.map((plan) => plan.id), ...plannedItems.map(({ item }) => item.id), "blueprint-review"]);
+  const reservedIds = new Set([...ids, ...plans.map((plan) => plan.id), ...plannedItems.map(({ item }) => item.id), "blueprint-review", "story-input"]);
   if (new Set(suggestions.map((suggestion) => suggestion.id)).size !== suggestions.length || suggestions.some((suggestion) => reservedIds.has(suggestion.id))) errors.push("新增建议 ID 重复或占用现有对象 ID");
   if (new Set(suggestions.flatMap((suggestion) => [suggestion.id, suggestion.item.id])).size !== suggestions.length * 2) errors.push("新增建议与建议项目 ID 重复");
   for (const suggestion of suggestions) {
@@ -279,16 +381,16 @@ export function validateBlueprintStructure(blueprint: Blueprint): string[] {
     if (!plan || suggestion.item.kind !== expectedPlan[plan.stageId] || suggestion.item.source !== "AI") errors.push("新增建议的清单范围、实体类型或来源无效");
     const membership = plannedItems.find(({ item }) => item.id === suggestion.item.id);
     if (reservedIds.has(suggestion.item.id) && !(suggestion.status === "APPROVED" && membership?.plan.id === suggestion.outlineId)) errors.push("新增建议项目 ID 与现有对象冲突");
-    for (const id of suggestion.item.relatedIds) if (!ids.has(id)) errors.push(`${suggestion.item.name}: 新增建议引用不存在`);
+    for (const id of suggestion.item.relatedIds) { const target = entities.find((row) => row.id === id); if (!target) errors.push(`${suggestion.item.name}: 新增建议引用不存在`); else if (plan && !canReferenceEntity(blueprint, plan, target)) errors.push(`${suggestion.item.name}: 新增建议引用违反前置方向`); }
   }
   for (const plan of plans) {
     if (!expectedPlan[plan.stageId] || plan.items.some((item) => item.kind !== expectedPlan[plan.stageId])) errors.push(`${plan.name}: 清单与阶段类型不匹配`);
     if ((plan.stageId === "branches") !== Boolean(plan.parentId) || (plan.parentId && !blueprint.chapters.some((chapter) => chapter.id === plan.parentId))) errors.push(`${plan.name}: 章节范围无效`);
     if (new Set(plan.items.map((item) => item.id)).size !== plan.items.length) errors.push(`${plan.name}: 项目 ID 重复`);
-    for (const id of plan.dependencies) if (!ids.has(id)) errors.push(`${plan.name}: 无效依赖 ${id}`);
+    for (const id of plan.dependencies) { const target = entities.find((row) => row.id === id); if (!target) errors.push(`${plan.name}: 无效依赖 ${id}`); else if (!canReferenceEntity(blueprint, plan, target)) errors.push(`${plan.name}: 依赖违反前置方向 ${id}`); }
     for (const item of plan.items) {
-      if (item.id === plan.id || item.id === "blueprint-review") errors.push(`${plan.name}: 非法项目 ID`);
-      for (const id of item.relatedIds) if (!ids.has(id)) errors.push(`${item.name}: 无效清单引用 ${id}`);
+      if (item.id === plan.id || item.id === "blueprint-review" || item.id === "story-input") errors.push(`${plan.name}: 非法项目 ID`);
+      for (const id of item.relatedIds) { const target = entities.find((row) => row.id === id); if (!target) errors.push(`${item.name}: 无效清单引用 ${id}`); else if (!canReferenceEntity(blueprint, plan, target)) errors.push(`${item.name}: 清单引用违反前置方向 ${id}`); }
       if (plan.status === "APPROVED" && item.enabled && !entities.some((entity) => entity.id === item.id && entity.kind === item.kind && entity.parentId === plan.parentId)) errors.push(`${item.name}: 已确认清单缺少对应实体`);
     }
   }
@@ -317,10 +419,10 @@ export function validateBlueprintStructure(blueprint: Blueprint): string[] {
   }
   for (const id of ids) visit(id);
   const selected = blueprint.workflowState.selectedObjectId;
-  if (selected && selected !== "blueprint-review" && !ids.has(selected) && !plans.some((plan) => plan.id === selected)) errors.push("当前审核对象不存在");
+  if (selected === "story-input" ? blueprint.workflowState.currentStage !== "story" : selected && selected !== "blueprint-review" && !ids.has(selected) && !plans.some((plan) => plan.id === selected)) errors.push("当前审核对象不存在或阶段不匹配");
   const generating = [...entities, ...plans, { id: "blueprint-review", status: blueprint.workflowState.review.status }].filter((row) => row.status === "GENERATING");
   const active = blueprint.workflowState.activeGeneration;
-  if (active ? generating.length !== 1 || generating[0].id !== active.targetId || active.previousStatus === "GENERATING" : generating.length > 0) errors.push("生成状态与持久化任务不一致");
+  if (active ? (active.targetId === "story-input" ? generating.length !== 0 : generating.length !== 1 || generating[0].id !== active.targetId) || active.previousStatus === "GENERATING" : generating.length > 0) errors.push("生成状态与持久化任务不一致");
   return [...new Set(errors)];
 }
 

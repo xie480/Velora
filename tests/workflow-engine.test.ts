@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { activeApprovedCharacters, allEntities, blueprintSchema, emptyContent, entityApprovalErrors, entityFields, previewImport, storyInputSchema } from "../src/shared/workflow.js";
+import { activeApprovedCharacters, allEntities, allowedReferenceEntities, blueprintSchema, canReferenceEntity, emptyContent, entityApprovalErrors, entityFields, migrateBlueprint, previewImport, storyInputSchema, validateBlueprintStructure } from "../src/shared/workflow.js";
 import type { Blueprint, Content, OutlineItem, StageId, WorkflowEntity } from "../src/shared/workflow.js";
 import {
   applyWorkflowCommand, assertCanGenerate, beginGeneration, canFinalize, completeGeneration,
@@ -39,7 +39,7 @@ function approve(bp: Blueprint, id: string): Blueprint {
 }
 function confirm(bp: Blueprint, stageId: StageId): Blueprint { return applyWorkflowCommand(bp, { type: "confirmStage", stageId }); }
 function planResult(kind: OutlineItem["kind"], names = [kind]): { items: unknown[] } {
-  return { items: names.map((name) => ({ name, kind, source: "AI", purpose: "推进调查主线", required: true, enabled: true, relatedIds: [], volumeNumbers: [] })) };
+  return { items: names.map((name) => ({ name, kind, source: "AI", purpose: "推进调查主线", required: true, enabled: true, relatedIds: [] })) };
 }
 function approvePlan(bp: Blueprint, id: string, result: unknown): Blueprint {
   return applyWorkflowCommand(generated(bp, id, result), { type: "approveOutline", outlineId: id });
@@ -78,6 +78,7 @@ function completedContent(): Blueprint {
 test("固定结构从用户数量展开，初始化与命令不修改原对象", () => {
   const original = createBlueprint();
   assert.equal(blueprintSchema.safeParse(original).success, true);
+  assert.equal(original.workflowState.selectedObjectId, "story-input");
   const configured = applyWorkflowCommand(original, { type: "configureChapters", counts: [2, 1] });
   assert.equal(original.volumes.length, 0);
   assert.equal(configured.volumes.length, 2);
@@ -107,11 +108,11 @@ test("AI 清单先审批再建实体，每次只能生成一个单元并按必�
   assert.equal(getStageStatus(bp, "characters"), "READY_TO_CONFIRM");
 });
 
-test("未配置卷章时允许规划预计卷号，用户预设人物必须保留 USER 来源", () => {
+test("未配置卷章时仍可规划人物，用户预设人物必须保留 USER 来源", () => {
   let bp = base([]);
   bp = applyWorkflowCommand(bp, { type: "updateStoryInput", input: { ...bp.storyInput, presetCharacters: ["Alice"] } });
   bp = confirm(approve(bp, "story-bible"), "story");
-  const result = { items: [{ name: "Bob", kind: "character", source: "AI", purpose: "连接过去事件", required: true, enabled: true, relatedIds: [], volumeNumbers: [1] }] };
+  const result = { items: [{ name: "Bob", kind: "character", source: "AI", purpose: "连接过去事件", required: true, enabled: true, relatedIds: [] }] };
   bp = generated(bp, "outline-characters", result);
   const items = bp.workflowState.outlinePlans.find((row) => row.id === "outline-characters")!.items;
   assert.equal(items.find((row) => row.name === "Alice")?.source, "USER");
@@ -157,7 +158,7 @@ test("修改前置人物保留所有后续内容，传播复审并使总体检�
 
 test("AI 输出、人工修改和审批均检查 Schema、引用、属性与必填字段", () => {
   let bp = confirm(approve(base(), "story-bible"), "story");
-  const badOutline = { items: [{ name: "越界", kind: "ending", source: "AI", purpose: "不合法", required: true, enabled: true, relatedIds: [], volumeNumbers: [] }] };
+  const badOutline = { items: [{ name: "越界", kind: "ending", source: "AI", purpose: "不合法", required: true, enabled: true, relatedIds: [] }] };
   assert.throws(() => generated(bp, "outline-characters", badOutline), /类型范围/);
   assert.throws(() => generated(bp, "outline-characters", { ...planResult("character"), characters: [] }));
   bp = approvePlan(bp, "outline-characters", planResult("character"));
@@ -261,7 +262,7 @@ test("新增建议等待审批，批准只修改清单，确认清单之后才�
   let bp = confirm(approve(base(), "story-bible"), "story");
   bp = approvePlan(bp, "outline-characters", planResult("character", ["Alice"]));
   const alice = bp.characters[0];
-  const addition = { outlineId: "outline-characters", name: "Teacher", kind: "character", source: "AI", purpose: "连接过去与现在的事件", required: true, enabled: true, relatedIds: [bp.storyBible.id], volumeNumbers: [1] };
+  const addition = { outlineId: "outline-characters", name: "Teacher", kind: "character", source: "AI", purpose: "连接过去与现在的事件", required: true, enabled: true, relatedIds: [bp.storyBible.id] };
   bp = generated(bp, alice.id, { content: contentFor(bp, alice), additionSuggestions: [addition] });
   assert.equal(bp.characters.length, 1);
   assert.equal(bp.workflowState.outlinePlans.find((row) => row.id === "outline-characters")?.items.length, 1);
@@ -286,7 +287,7 @@ test("拒绝新增建议不扩张范围，越界、伪造 ID 和未来引用均�
   let bp = confirm(approve(base(), "story-bible"), "story");
   bp = approvePlan(bp, "outline-characters", planResult("character", ["Alice"]));
   const alice = bp.characters[0];
-  const addition = { outlineId: "outline-characters", name: "Doctor", kind: "character", source: "AI", purpose: "解释调查证据", required: true, enabled: true, relatedIds: [bp.storyBible.id], volumeNumbers: [] };
+  const addition = { outlineId: "outline-characters", name: "Doctor", kind: "character", source: "AI", purpose: "解释调查证据", required: true, enabled: true, relatedIds: [bp.storyBible.id] };
   const result = { content: contentFor(bp, alice), additionSuggestions: [addition] };
   assert.throws(() => generated(bp, alice.id, { ...result, additionSuggestions: [{ ...addition, outlineId: "missing-outline" }] }), /清单不存在/);
   assert.throws(() => generated(bp, alice.id, { ...result, additionSuggestions: [{ ...addition, kind: "ending" }] }), /类型/);
@@ -329,8 +330,8 @@ test("导入不能删除已批准清单的必需实体绕过审批或提前进�
 test("未采用的可选人物草稿不阻塞初始世界及 Finalize，禁用人物不强制初始映射", () => {
   let bp = confirm(approve(base([1]), "story-bible"), "story");
   bp = approvePlan(bp, "outline-characters", { items: [
-    { name: "Alice", kind: "character", source: "AI", purpose: "主线调查", required: true, enabled: true, relatedIds: [], volumeNumbers: [] },
-    { name: "Observer", kind: "character", source: "AI", purpose: "可选的调查视角", required: false, enabled: true, relatedIds: [], volumeNumbers: [] },
+    { name: "Alice", kind: "character", source: "AI", purpose: "主线调查", required: true, enabled: true, relatedIds: [] },
+    { name: "Observer", kind: "character", source: "AI", purpose: "可选的调查视角", required: false, enabled: true, relatedIds: [] },
   ] });
   bp = approve(bp, bp.characters[0].id);
   const optionalId = bp.characters[1].id;
@@ -350,4 +351,119 @@ test("未采用的可选人物草稿不阻塞初始世界及 Finalize，禁用�
   disabled.workflowState.outlinePlans.find((plan) => plan.stageId === "characters")!.items[1].enabled = false;
   assert.deepEqual(activeApprovedCharacters(disabled).map((character) => character.id), [bp.characters[0].id]);
   assert.deepEqual(entityApprovalErrors(disabled, disabled.initialWorldState!), []);
+});
+
+test("正式引用仅指向前置阶段及明确同阶段上游，清单不能绑定自己的详情", () => {
+  const bp = completedContent();
+  const alice = bp.characters[0]; const bob = bp.characters[1];
+  assert.equal(canReferenceEntity(bp, alice, bp.storyBible), true);
+  for (const row of [alice, bob, bp.relationships!, bp.endings[0], bp.chapters[0], bp.gameSystems[0]]) assert.equal(canReferenceEntity(bp, alice, row), false);
+  const characterOutline = bp.workflowState.outlinePlans.find((plan) => plan.stageId === "characters")!;
+  assert.deepEqual(allowedReferenceEntities(bp, characterOutline).map((row) => row.id), [bp.storyBible.id]);
+  assert.equal(canReferenceEntity(bp, bp.relationships!, alice), true);
+  assert.equal(canReferenceEntity(bp, bp.chapters[0], bp.volumes[0]), true);
+  assert.equal(canReferenceEntity(bp, bp.chapters[0], bp.chapters[1]), false);
+  assert.equal(canReferenceEntity(bp, bp.chapters[1], bp.chapters[0]), true);
+  const branchOwner = { ...bp.chapterCharacterPlans[0], id: "branch-direction", kind: "criticalBranch" as const, content: emptyContent("criticalBranch") };
+  assert.equal(canReferenceEntity(bp, branchOwner, bp.chapterCharacterPlans[0]), true);
+  assert.equal(canReferenceEntity(bp, branchOwner, bp.chapterCharacterPlans[1]), false);
+  assert.equal(canReferenceEntity(bp, bp.initialWorldState!, bp.gameSystems[0]), true);
+  assert.equal(canReferenceEntity(bp, bp.gameSystems[0], bp.initialWorldState!), false);
+  const wrong = structuredClone(bp);
+  wrong.workflowState.outlinePlans.find((plan) => plan.id === characterOutline.id)!.items[0].relatedIds = [bob.id];
+  assert.equal(previewImport("blueprint", wrong).valid, false);
+  assert.throws(() => applyWorkflowCommand(bp, { type: "updateOutline", outlineId: characterOutline.id, items: characterOutline.items.map((item, index) => index === 0 ? { ...item, relatedIds: [bp.endings[0].id] } : item) }), /前置方向/);
+});
+
+test("前置 AI 上下文隔离后置实体、卷章结构和清单，后置 Addition 被拒绝", () => {
+  const bp = completedContent();
+  bp.storyInput.presetEndings = ["True End 创作意向"];
+  const storyContext = getGenerationTarget(bp, bp.storyBible.id).context as { storyInput: Record<string, unknown>; approvedEntities: WorkflowEntity[]; outlineScopes: unknown[] };
+  assert.deepEqual(storyContext.approvedEntities, []);
+  assert.deepEqual(storyContext.outlineScopes, []);
+  assert.equal(Object.hasOwn(storyContext.storyInput, "volumeChapterCounts"), false);
+  assert.deepEqual(storyContext.storyInput.presetEndings, ["True End 创作意向"]);
+  const characterContext = getGenerationTarget(bp, bp.characters[0].id).context as { approvedEntities: WorkflowEntity[]; outlineScopes: Array<{ stageId: StageId }> };
+  assert.deepEqual(characterContext.approvedEntities.map((row) => row.id), [bp.storyBible.id]);
+  assert.deepEqual(characterContext.outlineScopes.map((scope) => scope.stageId), ["characters"]);
+  const chapterContext = getGenerationTarget(bp, bp.chapters[0].id).context as { approvedEntities: WorkflowEntity[] };
+  assert.equal(chapterContext.approvedEntities.some((row) => row.id === bp.chapters[1].id), false);
+  const addition = { outlineId: "outline-systems", name: "未来系统", kind: "gameSystem", source: "AI", purpose: "不允许从人物阶段新增后置系统", required: true, enabled: true, relatedIds: [] };
+  assert.throws(() => generated(bp, bp.characters[0].id, { content: contentFor(bp, bp.characters[0]), additionSuggestions: [addition] }), /后置阶段/);
+  const systemContext = getGenerationTarget(bp, bp.gameSystems[0].id).context as { approvedEntities: WorkflowEntity[] };
+  assert.equal(systemContext.approvedEntities.some((row) => row.kind === "initialWorldState"), false);
+});
+
+test("Schema v1 迁移保留旧出场意向与正文，修正关联方向并使受影响内容复审", () => {
+  const bp = completedContent();
+  const legacy = { ...structuredClone(bp), schemaVersion: 1, workflowState: { ...structuredClone(bp.workflowState), outlinePlans: bp.workflowState.outlinePlans.map((plan) => ({ ...structuredClone(plan), items: plan.items.map((item) => ({ ...structuredClone(item), volumeNumbers: plan.stageId === "characters" ? [1] : [] })) })) } };
+  const characterOutline = legacy.workflowState.outlinePlans.find((plan) => plan.stageId === "characters")!;
+  characterOutline.items[0].relatedIds = [bp.endings[0].id];
+  legacy.characters[0].dependencies.push(bp.gameSystems[0].id);
+  const originalBytes = JSON.stringify(legacy);
+  const migrated = migrateBlueprint(legacy) as Blueprint;
+  assert.equal(JSON.stringify(legacy), originalBytes);
+  assert.equal(migrated.schemaVersion, 2);
+  const nextOutline = migrated.workflowState.outlinePlans.find((plan) => plan.stageId === "characters")!;
+  assert.equal(Object.hasOwn(nextOutline.items[0], "volumeNumbers"), false);
+  assert.ok(nextOutline.items[0].purpose.includes("旧版出场意向"));
+  assert.deepEqual(nextOutline.items[0].relatedIds, []);
+  assert.equal(nextOutline.status, "NEEDS_REVIEW");
+  assert.ok(nextOutline.reviewReasons.some((reason) => reason.includes("前置方向")));
+  assert.equal(migrated.characters[0].status, "NEEDS_REVIEW");
+  assert.equal(migrated.characters[0].dependencies.includes(bp.gameSystems[0].id), false);
+  assert.equal(migrated.storyBible.status, "APPROVED");
+  assert.equal(migrated.workflowState.stageConfirmations.characters, false);
+  assert.equal(migrated.workflowState.review.basedOnContentRevision, null);
+  assert.deepEqual(migrated.chapters[0].content, bp.chapters[0].content);
+  assert.deepEqual(validateBlueprintStructure(migrated), []);
+  const preview = previewImport("blueprint", legacy);
+  assert.equal(preview.valid, true);
+  assert.ok(preview.warnings.some((warning) => warning.includes("Schema v1")));
+});
+
+test("Schema v2 拒绝前向依赖及已经退役的出场卷号，不执行静默转换", () => {
+  const bp = base();
+  const invalid = structuredClone(bp); invalid.storyBible.dependencies = [invalid.chapters[0].id];
+  assert.equal(previewImport("blueprint", invalid).valid, false);
+  assert.equal((migrateBlueprint(invalid) as Blueprint).storyBible.dependencies[0], invalid.chapters[0].id);
+  let prepared = confirm(approve(bp, "story-bible"), "story");
+  const legacyAI = { items: [{ name: "Alice", kind: "character", source: "AI", purpose: "用户将稍后确定卷章", required: true, enabled: true, relatedIds: [], volumeNumbers: [1] }] };
+  assert.throws(() => generated(prepared, "outline-characters", legacyAI));
+  prepared = approvePlan(prepared, "outline-characters", planResult("character"));
+  const plan = prepared.workflowState.outlinePlans.find((row) => row.id === "outline-characters")!;
+  assert.throws(() => applyWorkflowCommand(prepared, { type: "updateOutline", outlineId: plan.id, items: plan.items.map((item) => ({ ...item, volumeNumbers: [] })) }));
+});
+
+test("基础输入虚拟目标可保存选择与填充任务，取消保留 Story Bible 审批状态", () => {
+  const bp = completedCharacters();
+  const selected = applyWorkflowCommand(bp, { type: "select", stageId: "story", objectId: "story-input" });
+  assert.equal(selected.workflowState.selectedObjectId, "story-input");
+  assert.throws(() => applyWorkflowCommand(bp, { type: "select", stageId: "characters", objectId: "story-input" }), /阶段/);
+  selected.workflowState.activeGeneration = { targetId: "story-input", token: "fill-story-token", startedAt: new Date().toISOString(), previousStatus: selected.storyBible.status };
+  assert.deepEqual(validateBlueprintStructure(selected), []);
+  const cancelled = failGeneration(selected, "基础输入填充已取消");
+  assert.equal(cancelled.workflowState.activeGeneration, null);
+  assert.equal(cancelled.storyBible.status, bp.storyBible.status);
+  assert.deepEqual(cancelled.storyBible.content, bp.storyBible.content);
+  assert.equal(previewImport("blueprint", cancelled).valid, true);
+});
+
+test("实体名称同步到规范清单，后续只改定位并确认不会回滚已采用名称", () => {
+  let bp = completedCharacters();
+  const alice = bp.characters[0];
+  const initialPlan = bp.workflowState.outlinePlans.find((plan) => plan.stageId === "characters")!;
+  const originalItem = structuredClone(initialPlan.items.find((item) => item.id === alice.id)!);
+  bp = applyWorkflowCommand(bp, { type: "updateEntity", entityId: alice.id, name: "Eve", content: alice.content });
+  const plan = bp.workflowState.outlinePlans.find((row) => row.stageId === "characters")!;
+  const item = plan.items.find((row) => row.id === alice.id)!;
+  assert.equal(bp.characters[0].name, "Eve");
+  assert.equal(item.name, "Eve");
+  assert.equal(plan.status, "APPROVED");
+  assert.equal(item.source, originalItem.source);
+  assert.equal(item.userModified, originalItem.userModified);
+  bp = applyWorkflowCommand(bp, { type: "updateOutline", outlineId: plan.id, items: plan.items.map((row) => row.id === alice.id ? { ...row, purpose: "调整调查定位" } : row) });
+  bp = applyWorkflowCommand(bp, { type: "approveOutline", outlineId: plan.id });
+  assert.equal(bp.characters[0].name, "Eve");
+  assert.equal(bp.workflowState.outlinePlans.find((row) => row.id === plan.id)!.items.find((row) => row.id === alice.id)!.name, "Eve");
 });

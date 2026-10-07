@@ -3,7 +3,7 @@
  * Every mutation uses compare-and-swap; a stale browser or model response cannot overwrite newer work.
  */
 import { sqlite } from "../db/index.js";
-import { blueprintSchema, MAX_IMPORT_BYTES } from "../../shared/workflow.js";
+import { blueprintSchema, MAX_IMPORT_BYTES, migrateBlueprint } from "../../shared/workflow.js";
 import type { Blueprint, VersionSnapshot, VersionSummary, WorkflowResponse } from "../../shared/workflow.js";
 import { createBlueprint } from "../../shared/workflowEngine.js";
 
@@ -34,7 +34,7 @@ const versionColumns = "version, parent_version AS parentVersion, created_at AS 
 
 function parseStoredBlueprint(value: string): Blueprint {
   try {
-    return blueprintSchema.parse(JSON.parse(value));
+    return blueprintSchema.parse(migrateBlueprint(JSON.parse(value)));
   } catch {
     throw new WorkflowStoreError("本地 Blueprint 数据无法读取，请保留数据库文件并检查日志。");
   }
