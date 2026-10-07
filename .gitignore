@@ -1,0 +1,66 @@
+# Node.js dependencies and package-manager caches
+node_modules/
+.pnp.*
+.npm/
+.pnpm-store/
+.yarn/cache/
+
+# Build output and tool caches
+dist/
+build/
+out/
+coverage/
+.cache/
+.turbo/
+.vite/
+.vite-temp/
+.next/
+.nuxt/
+.svelte-kit/
+.output/
+*.tsbuildinfo
+
+# Local data, indexes, databases, and logs
+.data/
+*.usearch
+*.sqlite
+*.sqlite-*
+*.db-wal
+*.db-shm
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
+
+# Environment files and secrets
+.env
+.env.*
+!.env.example
+
+# Model and inference caches
+.huggingface/
+.transformers-cache/
+models-cache/
+*.onnx_data
+
+# Test and coverage artifacts
+test-results/
+playwright-report/
+blob-report/
+
+# Python environments and caches used by local model tooling
+.venv/
+venv/
+__pycache__/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Operating-system and editor files
+.DS_Store
+Thumbs.db
+Desktop.ini
+.idea/
+.vscode/*
+!.vscode/extensions.json
