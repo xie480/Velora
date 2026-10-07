@@ -13,6 +13,8 @@
     "build": "npm run build:web && npm run build:api",
     "build:web": "vite build",
     "build:api": "tsc -p tsconfig.server.json",
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.server.json --noEmit",
+    "test": "node --import tsx --test tests/*.test.ts",
     "start": "node --env-file-if-exists=.env dist/server/index.js",
     "db:generate": "node --env-file-if-exists=.env ./node_modules/drizzle-kit/bin.cjs generate",
     "db:migrate": "node --env-file-if-exists=.env ./node_modules/drizzle-kit/bin.cjs migrate"
