@@ -49,6 +49,17 @@ app.get("/api/system/diagnostics", async (context) =>
   context.json(await getDiagnosticReport()),
 );
 
+try {
+  const { providerRoutes } = await import("./routes/providers.js");
+  app.route("/api/providers", providerRoutes);
+} catch {
+  const unavailableProviderRoutes = new Hono();
+  unavailableProviderRoutes.all("*", (context) =>
+    context.json({ error: "SQLite 未能初始化，本机 API 配置暂不可用。" }, 503),
+  );
+  app.route("/api/providers", unavailableProviderRoutes);
+}
+
 app.all("/api/*", (context) => context.json({ error: "API route not found." }, 404));
 
 const clientDirectory = resolve(process.cwd(), "dist/client");

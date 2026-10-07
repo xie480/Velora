@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Activity,
   ArrowDownRight,
@@ -6,7 +6,6 @@ import {
   BookOpen,
   CheckCircle2,
   CircleAlert,
-  CircleDashed,
   Clock3,
   Cpu,
   Database,
@@ -15,12 +14,14 @@ import {
   Layers3,
   Network,
   RefreshCw,
+  Settings2,
   ShieldCheck,
   Sparkles,
   X,
 } from "lucide-react";
 import type { DiagnosticGroup, DiagnosticItem, DiagnosticReport } from "../shared/diagnostics";
 import { NarrativePreview } from "./components/NarrativePreview";
+import { ProviderSettings } from "./components/ProviderSettings";
 
 const frontendItems: DiagnosticItem[] = [
   {
@@ -154,7 +155,6 @@ function formatCheckedAt(value: string): string {
 function StatusGlyph({ state }: { state: DiagnosticItem["state"] }) {
   if (state === "connected") return <CheckCircle2 size={16} aria-hidden="true" />;
   if (state === "failed") return <CircleAlert size={16} aria-hidden="true" />;
-  if (state === "not_integrated") return <CircleDashed size={16} aria-hidden="true" />;
   return <Clock3 size={16} aria-hidden="true" />;
 }
 
@@ -163,7 +163,6 @@ function StatusText({ state }: { state: DiagnosticItem["state"] }) {
     connected: "连接成功",
     failed: "检查失败",
     not_configured: "待配置",
-    not_integrated: "待接入",
   };
   return <span className={`status-pill status-pill--${state}`}><StatusGlyph state={state} />{labels[state]}</span>;
 }
@@ -215,7 +214,7 @@ function DiagnosticsDialog({
   open: boolean;
   onClose: () => void;
 }) {
-  const dialogRef = useRef<HTMLDialogElement>(null);
+  const dialogRef = useRef<HTMLDivElement>(null);
   const [loading, setLoading] = useState(false);
   const [report, setReport] = useState<DiagnosticReport | null>(null);
   const [notice, setNotice] = useState("");
@@ -251,12 +250,40 @@ function DiagnosticsDialog({
   }
 
   useEffect(() => {
-    const dialog = dialogRef.current;
-    if (!dialog) return;
-    if (open && !dialog.open) dialog.showModal();
-    if (!open && dialog.open) dialog.close();
-    if (open) void runCheck();
-  }, [open]);
+    if (!open) return;
+    const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    dialogRef.current?.focus();
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        onClose();
+        return;
+      }
+      if (event.key !== "Tab" || !dialogRef.current) return;
+      const focusable = [...dialogRef.current.querySelectorAll<HTMLElement>(
+        'button:not([disabled]), a[href], input:not([disabled]), [tabindex]:not([tabindex="-1"])',
+      )];
+      if (!focusable.length) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && (document.activeElement === first || document.activeElement === dialogRef.current)) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && (document.activeElement === last || document.activeElement === dialogRef.current)) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    document.addEventListener("keydown", handleKeyDown);
+    void runCheck();
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      document.removeEventListener("keydown", handleKeyDown);
+      previousFocus?.focus();
+    };
+  }, [open, onClose]);
 
   const groupedItems = useMemo(() => {
     const items = report?.items ?? [];
@@ -269,15 +296,18 @@ function DiagnosticsDialog({
   const connectedCount = report?.items.filter((item) => item.state === "connected").length ?? 0;
   const totalCount = report?.items.length ?? 0;
 
+  if (!open) return null;
+
   return (
-    <dialog
-      className="diagnostics-dialog"
-      ref={dialogRef}
-      aria-labelledby="diagnostics-title"
-      onCancel={(event) => { event.preventDefault(); onClose(); }}
-      onClose={onClose}
-      onClick={(event) => { if (event.target === event.currentTarget) onClose(); }}
-    >
+    <div className="diagnostics-overlay" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
+      <div
+        className="diagnostics-dialog"
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="diagnostics-title"
+        tabIndex={-1}
+      >
       <div className="diagnostics-dialog__inner">
         <header className="dialog-header">
           <div className="dialog-header__title">
@@ -340,17 +370,22 @@ function DiagnosticsDialog({
         )}
         {notice && <p className="dialog-notice" role="alert">{notice}</p>}
       </div>
-    </dialog>
+      </div>
+    </div>
   );
 }
 
 export function App() {
   const [dialogOpen, setDialogOpen] = useState(false);
+  const closeDiagnostics = useCallback(() => setDialogOpen(false), []);
+  const [activeView, setActiveView] = useState<"overview" | "providers">(() =>
+    new URLSearchParams(window.location.search).get("view") === "providers" ? "providers" : "overview",
+  );
 
   return (
     <div className="app-shell">
       <aside className="sidebar">
-        <a className="brand" href="#top" aria-label="Project Chronicle 总览">
+        <a className="brand" href="#top" aria-label="Project Chronicle 总览" onClick={(event) => { event.preventDefault(); setActiveView("overview"); }}>
           <span className="brand__symbol" aria-hidden="true">
             <svg viewBox="0 0 40 40" fill="none">
               <path d="M7 11.5h10.4c3 0 5.4 2.4 5.4 5.4v11.6H12.4A5.4 5.4 0 0 1 7 23.1V11.5Z" />
@@ -363,10 +398,13 @@ export function App() {
 
         <div className="sidebar-label">工作空间</div>
         <nav className="sidebar-nav" aria-label="主导航">
-          <a className="nav-item nav-item--active" href="#overview" aria-current="page">
+          <button className={`nav-item nav-item--button ${activeView === "overview" ? "nav-item--active" : ""}`} type="button" onClick={() => setActiveView("overview")} aria-current={activeView === "overview" ? "page" : undefined}>
             <Layers3 size={17} aria-hidden="true" /><span>创作总览</span><span className="nav-item__edge" />
-          </a>
-          <button className="nav-item" type="button" onClick={() => setDialogOpen(true)}>
+          </button>
+          <button className={`nav-item nav-item--button ${activeView === "providers" ? "nav-item--active" : ""}`} type="button" onClick={() => setActiveView("providers")} aria-current={activeView === "providers" ? "page" : undefined}>
+            <Settings2 size={17} aria-hidden="true" /><span>模型与 API</span><ArrowRight size={14} className="nav-item__arrow" aria-hidden="true" />
+          </button>
+          <button className="nav-item nav-item--button" type="button" onClick={() => setDialogOpen(true)}>
             <Cpu size={17} aria-hidden="true" /><span>技术环境</span><ArrowRight size={14} className="nav-item__arrow" aria-hidden="true" />
           </button>
         </nav>
@@ -390,7 +428,7 @@ export function App() {
 
       <main className="main-area" id="top">
         <header className="topbar">
-          <div className="breadcrumb"><span>工作空间</span><span className="breadcrumb__slash">/</span><strong>创作总览</strong></div>
+          <div className="breadcrumb"><span>工作空间</span><span className="breadcrumb__slash">/</span><strong>{activeView === "providers" ? "模型与 API" : "创作总览"}</strong></div>
           <div className="topbar__actions">
             <span className="privacy-tag"><ShieldCheck size={14} aria-hidden="true" />本地优先</span>
             <span className="topbar__divider" />
@@ -400,6 +438,7 @@ export function App() {
           </div>
         </header>
 
+        {activeView === "providers" ? <ProviderSettings /> : (
         <div className="page-content" id="overview">
           <section className="welcome-band">
             <div className="welcome-band__grid" aria-hidden="true" />
@@ -494,8 +533,9 @@ export function App() {
 
           <footer className="page-footer"><span>PROJECT CHRONICLE</span><span>项目数据本地保存 · AI 请求发送至你配置的服务</span><span>V 0.1.0</span></footer>
         </div>
+        )}
       </main>
-      <DiagnosticsDialog open={dialogOpen} onClose={() => setDialogOpen(false)} />
+      <DiagnosticsDialog open={dialogOpen} onClose={closeDiagnostics} />
     </div>
   );
 }

@@ -1,8 +1,7 @@
 export type DiagnosticState =
   | "connected"
   | "failed"
-  | "not_configured"
-  | "not_integrated";
+  | "not_configured";
 
 export type DiagnosticGroup = "local" | "ai";
 

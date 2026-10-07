@@ -38,10 +38,6 @@ function notConfigured(id: string, label: string, detail: string): DiagnosticIte
   return { id, label, group: "ai", state: "not_configured", detail };
 }
 
-function notIntegrated(id: string, label: string, detail: string): DiagnosticItem {
-  return { id, label, group: "ai", state: "not_integrated", detail };
-}
-
 function failedProviderCheck(
   id: string,
   label: string,
@@ -67,62 +63,45 @@ function failedProviderCheck(
   };
 }
 
-function createClient(baseURL: string, apiKey: string | undefined) {
-  const url = new URL(baseURL);
-  if (url.protocol !== "https:" && url.protocol !== "http:") {
-    throw new Error("Provider URL must use HTTP or HTTPS");
-  }
-  if (url.protocol === "http:" && !["localhost", "127.0.0.1", "[::1]", "::1"].includes(url.hostname)) {
-    throw new Error("Non-local provider URLs must use HTTPS");
-  }
-  if (url.username || url.password) {
-    throw new Error("Provider URL must not embed credentials");
-  }
-  if (url.search || url.hash) {
-    throw new Error("Provider URL must not include a query or fragment");
-  }
-  return import("openai").then(({ default: OpenAI }) =>
-    new OpenAI({
-      apiKey: apiKey || "local-provider",
-      baseURL: url.toString().replace(/\/$/, ""),
-      timeout: 8_000,
-      maxRetries: 0,
-      fetch: (request, init) =>
-        fetch(request, { ...init, redirect: "error", signal: AbortSignal.timeout(8_000) }),
-    }),
-  );
-}
-
 async function checkOpenAICompatible(): Promise<DiagnosticItem> {
-  if (!providerSettingsResult.success) {
+  let profile;
+  try {
+    const { getActiveProviderProfileRow } = await import("./providerProfiles.js");
+    profile = getActiveProviderProfileRow();
+  } catch {
     return {
       id: "openai-relay",
       label: "OpenAI 兼容服务",
       group: "ai",
       state: "failed",
-      detail: "环境变量格式无效，请检查服务端配置。",
+      detail: "SQLite 未能打开，无法读取本机 API 配置。",
     };
   }
-
-  const settings = providerSettingsResult.data;
-  if (!settings.OPENAI_BASE_URL) {
+  if (!profile || profile.providerType !== "openai_compatible" || !profile.baseUrl) {
     return notConfigured(
       "openai-relay",
       "OpenAI 兼容服务",
-      "尚未配置 OPENAI_BASE_URL；密钥只保存在本机服务端。",
+      "当前未激活 OpenAI 兼容中转配置；请在模型与 API 设置中添加并切换预设。",
     );
   }
 
   const startedAt = performance.now();
   try {
-    const client = await createClient(settings.OPENAI_BASE_URL, settings.OPENAI_API_KEY);
+    const [{ decryptSecret }, { createOpenAICompatibleClient }] = await Promise.all([
+      import("./secretVault.js"),
+      import("./openAICompatible.js"),
+    ]);
+    const apiKey = profile.apiKeyCiphertext ? decryptSecret(profile.apiKeyCiphertext) : undefined;
+    const client = await createOpenAICompatibleClient(profile.baseUrl, apiKey);
     const result = await client.models.list();
+    const configured = new Set([profile.modelSmall, profile.modelMedium, profile.modelLarge]);
+    const availableCount = result.data.filter((model) => configured.has(model.id)).length;
     return {
       id: "openai-relay",
       label: "OpenAI 兼容服务",
       group: "ai",
       state: "connected",
-      detail: `标准 /models 目录可访问，返回 ${result.data.length} 个模型${settings.OPENAI_MODEL ? `；已配置模型 ${settings.OPENAI_MODEL}` : ""}。`,
+      detail: `“${profile.name}”端点可访问，返回 ${result.data.length} 个模型；${availableCount} 个与预设相符。`,
       latencyMs: Math.round(performance.now() - startedAt),
     };
   } catch (error) {
@@ -176,7 +155,8 @@ async function checkEmbeddingProvider(): Promise<DiagnosticItem> {
 
   const startedAt = performance.now();
   try {
-    const client = await createClient(settings.EMBEDDING_BASE_URL, settings.EMBEDDING_API_KEY);
+    const { createOpenAICompatibleClient } = await import("./openAICompatible.js");
+    const client = await createOpenAICompatibleClient(settings.EMBEDDING_BASE_URL, settings.EMBEDDING_API_KEY);
     const result = await client.embeddings.create({
       model: settings.EMBEDDING_MODEL,
       input: "Project Chronicle local embedding connectivity check.",
@@ -195,12 +175,32 @@ async function checkEmbeddingProvider(): Promise<DiagnosticItem> {
   }
 }
 
-function checkChatGPTPlanProvider(): DiagnosticItem {
-  return notIntegrated(
-    "siwc",
-    "ChatGPT Plus · SIWC",
-    "官方 Sign in with ChatGPT 客户端授权尚未接入；资格、注册与许可条件仍待确认。",
-  );
+async function checkChatGPTPlanProvider(): Promise<DiagnosticItem> {
+  let profile;
+  try {
+    const { listProviderProfiles } = await import("./providerProfiles.js");
+    profile = listProviderProfiles().find(
+    (candidate) => candidate.providerType === "chatgpt_plan" && candidate.isActive,
+    );
+  } catch {
+    return notConfigured("siwc", "ChatGPT 计划额度", "SQLite 未能打开，无法读取本机 ChatGPT 授权配置。");
+  }
+  if (!profile) {
+    return notConfigured("siwc", "ChatGPT 计划额度", "当前未激活 ChatGPT 账号预设。可在模型与 API 设置中创建并登录。");
+  }
+  if (profile.chatgpt.planUsageAuthorized) {
+    return {
+      id: "siwc",
+      label: "ChatGPT 计划额度",
+      group: "ai",
+      state: "connected",
+      detail: `“${profile.name}”已授予 Responses API 计划额度权限；授权令牌保存在本机 SQLite。`,
+    };
+  }
+  if (profile.chatgpt.signedIn) {
+    return notConfigured("siwc", "ChatGPT 计划额度", "账号已登录，但未授予 chatgpt.tokens.use.direct scope。");
+  }
+  return notConfigured("siwc", "ChatGPT 计划额度", "此配置尚未完成 ChatGPT 账号授权；计划额度要求授权返回 chatgpt.tokens.use.direct scope，并使用符合资格的账户。");
 }
 
 async function checkUsearch(): Promise<DiagnosticItem> {
@@ -323,19 +323,20 @@ export async function getDiagnosticReport(): Promise<DiagnosticReport> {
       group: "local",
       state: providerSettingsResult.success ? "connected" : "failed",
       detail: providerSettingsResult.success
-        ? "服务端已加载 AI 提供方配置 Schema。"
-        : "AI 提供方配置不符合 Schema，请检查服务端环境变量。",
+        ? "服务端已加载本地 Embedding 配置 Schema。"
+        : "Embedding 环境配置不符合 Schema，请检查服务端环境变量。",
     },
   ];
 
-  const [usearch, openai, embedding] = await Promise.all([
+  const [usearch, openai, embedding, chatgpt] = await Promise.all([
     checkUsearch(),
     checkOpenAICompatible(),
     checkEmbeddingProvider(),
+    checkChatGPTPlanProvider(),
   ]);
 
   return {
     checkedAt: new Date().toISOString(),
-    items: [...localChecks, usearch, openai, embedding, checkChatGPTPlanProvider()],
+    items: [...localChecks, usearch, openai, embedding, chatgpt],
   };
 }

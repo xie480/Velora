@@ -7,9 +7,6 @@ const booleanSetting = z.preprocess(
 ).transform((value) => value === "true");
 
 const providerSettingsSchema = z.object({
-  OPENAI_BASE_URL: optionalSetting,
-  OPENAI_API_KEY: optionalSetting,
-  OPENAI_MODEL: optionalSetting,
   EMBEDDING_LOCAL_ENABLED: booleanSetting,
   EMBEDDING_LOCAL_MODEL_PATH: optionalSetting,
   EMBEDDING_BASE_URL: optionalSetting,
