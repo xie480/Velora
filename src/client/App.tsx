@@ -22,6 +22,7 @@ import {
 import type { DiagnosticGroup, DiagnosticItem, DiagnosticReport } from "../shared/diagnostics";
 import { NarrativePreview } from "./components/NarrativePreview";
 import { ProviderSettings } from "./components/ProviderSettings";
+import { WorkflowWorkbench } from "./components/WorkflowWorkbench";
 
 const frontendItems: DiagnosticItem[] = [
   {
@@ -378,9 +379,10 @@ function DiagnosticsDialog({
 export function App() {
   const [dialogOpen, setDialogOpen] = useState(false);
   const closeDiagnostics = useCallback(() => setDialogOpen(false), []);
-  const [activeView, setActiveView] = useState<"overview" | "providers">(() =>
-    new URLSearchParams(window.location.search).get("view") === "providers" ? "providers" : "overview",
-  );
+  const [activeView, setActiveView] = useState<"overview" | "providers" | "workflow">(() => {
+    const view = new URLSearchParams(window.location.search).get("view");
+    return view === "providers" || view === "workflow" ? view : "overview";
+  });
 
   return (
     <div className="app-shell">
@@ -400,6 +402,9 @@ export function App() {
         <nav className="sidebar-nav" aria-label="主导航">
           <button className={`nav-item nav-item--button ${activeView === "overview" ? "nav-item--active" : ""}`} type="button" onClick={() => setActiveView("overview")} aria-current={activeView === "overview" ? "page" : undefined}>
             <Layers3 size={17} aria-hidden="true" /><span>创作总览</span><span className="nav-item__edge" />
+          </button>
+          <button className={`nav-item nav-item--button ${activeView === "workflow" ? "nav-item--active" : ""}`} type="button" onClick={() => setActiveView("workflow")} aria-current={activeView === "workflow" ? "page" : undefined} aria-label="前置创作 Workflow">
+            <GitBranch size={17} aria-hidden="true" /><span>前置创作</span><ArrowRight size={14} className="nav-item__arrow" aria-hidden="true" />
           </button>
           <button className={`nav-item nav-item--button ${activeView === "providers" ? "nav-item--active" : ""}`} type="button" onClick={() => setActiveView("providers")} aria-current={activeView === "providers" ? "page" : undefined}>
             <Settings2 size={17} aria-hidden="true" /><span>模型与 API</span><ArrowRight size={14} className="nav-item__arrow" aria-hidden="true" />
@@ -428,7 +433,7 @@ export function App() {
 
       <main className="main-area" id="top">
         <header className="topbar">
-          <div className="breadcrumb"><span>工作空间</span><span className="breadcrumb__slash">/</span><strong>{activeView === "providers" ? "模型与 API" : "创作总览"}</strong></div>
+          <div className="breadcrumb"><span>工作空间</span><span className="breadcrumb__slash">/</span><strong>{activeView === "providers" ? "模型与 API" : activeView === "workflow" ? "前置创作 Workflow" : "创作总览"}</strong></div>
           <div className="topbar__actions">
             <span className="privacy-tag"><ShieldCheck size={14} aria-hidden="true" />本地优先</span>
             <span className="topbar__divider" />
@@ -438,7 +443,7 @@ export function App() {
           </div>
         </header>
 
-        {activeView === "providers" ? <ProviderSettings /> : (
+        {activeView === "workflow" ? <WorkflowWorkbench onOpenProviders={() => setActiveView("providers")} /> : activeView === "providers" ? <ProviderSettings /> : (
         <div className="page-content" id="overview">
           <section className="welcome-band">
             <div className="welcome-band__grid" aria-hidden="true" />
@@ -528,6 +533,7 @@ export function App() {
           <section className="launch-strip">
             <span className="launch-strip__icon"><BookOpen size={18} aria-hidden="true" /></span>
             <div><strong>一个故事，从一个清晰的世界开始。</strong><span>环境检查完成后，即可初始化你的第一个创作项目。</span></div>
+            <button className="quiet-button" type="button" onClick={() => setActiveView("workflow")}><GitBranch size={14} aria-hidden="true" />开始前置创作<ArrowRight size={14} aria-hidden="true" /></button>
             <span className="launch-strip__meta"><span />PRIVATE WORKSPACE</span>
           </section>
 
